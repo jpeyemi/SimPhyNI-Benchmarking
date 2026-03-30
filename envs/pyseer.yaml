@@ -1,0 +1,28 @@
+name: pyseer
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  - python=3.9
+  - pyseer
+  - pybedtools
+  - pysam
+  - bedtools
+  - bedops
+  - samtools
+  - mash
+  - dendropy
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - matplotlib
+  - statsmodels
+  - patsy
+  - joblib
+  - tqdm
+  - packaging
+  - pillow
+  - pip

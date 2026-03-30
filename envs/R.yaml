@@ -1,0 +1,46 @@
+name: r-env
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  - r-base
+  - r-tidyverse
+  - r-devtools
+  - r-caret
+  - r-randomforest
+  - r-nloptr
+  - r-lme4
+  - r-reshape2
+  - r-stringr
+  - r-ggplot2
+  - r-dplyr
+  - r-readr
+  - r-purrr
+  - r-forcats
+  - r-magrittr
+  - r-tidyr
+  - r-tibble
+  - r-glmnet
+  - r-rmarkdown
+  - r-knitr
+  - r-ggpubr
+  - r-cowplot
+  - r-data.table
+  - r-xml2
+  - r-jsonlite
+  - r-httr
+  - r-shiny
+  - r-plotly
+  - r-rcolorbrewer
+  - r-viridis
+  - r-pheatmap
+  - r-rcpp
+  - r-testthat
+  - r-remotes
+  - r-lattice
+  - r-mass
+  - r-e1071
+  - r-irkernel
+  - jupyter

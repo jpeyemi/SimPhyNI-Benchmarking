@@ -1,0 +1,26 @@
+num_pairs: 300
+effect_sizes: [3, 2, 1, 0.75, 0.5, 0.25]
+msprime_target_leaves: 500
+
+# Fixed trees (name -> relative path from project root)
+fixed_trees:
+  ecoli: inputs/strain_tree_ecoli.nwk
+  Escherichia_coli: inputs/species_trees/Escherichia_coli.nwk
+  Bordetella_pertussis: inputs/species_trees/Bordetella_pertussis.nwk
+  Listeria_monocytogenes: inputs/species_trees/Listeria_monocytogenes.nwk
+  Staphyloccocus_aureus: inputs/species_trees/Staphyloccocus_aureus.nwk
+  Helicobacter_pylori: inputs/species_trees/Helicobacter_pylori.nwk
+  Pseudomonas_aeruginosa: inputs/species_trees/Pseudomonas_aeruginosa.nwk
+  Mycobacterium_tuberculosis: inputs/species_trees/Mycobacterium_tuberculosis.nwk
+  Streptococcus_pyogenes: inputs/species_trees/Streptococcus_pyogenes.nwk
+  Klebsiella_pneumoniae: inputs/species_trees/Klebsiella_pneumoniae.nwk
+  Salmonella_enterica: inputs/species_trees/Salmonella_enterica.nwk
+  Bacillus_subtilis: inputs/species_trees/Bacillus_subtilis.nwk
+
+num_msprime_main: 3        # generates msprime_0, msprime_1, msprime_2
+num_msprime_benchmark: 3   # generates bench_0, bench_1, bench_2 (ACR benchmarking only)
+
+# ACR benchmarking settings
+benchmark_max_workers: 64
+benchmark_n_stability: 32
+benchmark_n_stability_iters: 10   # simulate→reconstruct cycles for stability_trajectory.csv

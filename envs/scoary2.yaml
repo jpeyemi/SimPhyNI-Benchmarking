@@ -1,0 +1,24 @@
+name: scoary-2
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - matplotlib
+  - statsmodels
+  - joblib
+  - numba
+  - patsy
+  - pillow
+  - fire
+  - gcc_linux-64
+  - gxx_linux-64
+  - pip>=25
+  - pip:
+      - scoary-2==0.0.15
