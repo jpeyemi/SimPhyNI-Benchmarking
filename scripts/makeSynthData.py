@@ -10,10 +10,20 @@ _KDE_CACHE = {}
 
 
 def _load_kde(path='scripts/kde_model.pkl'):
-    """Load KDE model from disk, caching after first load."""
+    """Load KDE model from disk, caching after first load.
+
+    Returns (kde, ecoli_mean_subsize).
+    Supports both the new dict format (from build_kde.py) and the legacy
+    raw-KDE format (ecoli_mean_subsize will be None for legacy files).
+    """
     if path not in _KDE_CACHE:
         with open(path, 'rb') as f:
-            _KDE_CACHE[path] = pickle.load(f)
+            obj = pickle.load(f)
+        if isinstance(obj, dict):
+            _KDE_CACHE[path] = (obj['kde'], obj['ecoli_mean_subsize'])
+        else:
+            # Legacy format: raw KDE object, no scaling metadata
+            _KDE_CACHE[path] = (obj, None)
     return _KDE_CACHE[path]
 
 
@@ -32,24 +42,27 @@ def _compute_bl_stats(t):
     return upper_bound, bl_mean
 
 
-def synth_mutual_4state_nosim(dir, t, mod, kde=None, bl_stats=None):
+def synth_mutual_4state_nosim(dir, t, mod, kde=None, bl_stats=None, ecoli_mean_subsize=None, gamma_alpha=None):
     """
     Simulate a pair of binary traits under a 4-state CTMC model (no simultaneous transitions).
 
     Parameters
     ----------
-    dir      : -1, 0, or 1 — direction of association
-    t        : ete3 Tree
-    mod      : effect size modifier (log10 scale)
-    kde      : pre-loaded KDE model (optional; loaded from disk if None)
-    bl_stats : (upper_bound, bl_mean) tuple from _compute_bl_stats (optional; computed if None)
+    dir               : -1, 0, or 1 — direction of association
+    t                 : ete3 Tree
+    mod               : effect size modifier (log10 scale)
+    kde               : pre-loaded KDE object (optional; loaded from disk if None)
+    bl_stats          : (upper_bound, bl_mean) tuple from _compute_bl_stats (optional)
+    ecoli_mean_subsize: float — mean(gain_subsize_marginal_thresh) from build_kde.py;
+                        used to convert KDE-sampled rates to new-tree rates.
+                        Loaded from KDE pkl if None.
     """
     num_nodes = len(t.get_descendants()) + 1
     node_map = {node: idx for idx, node in enumerate([t] + t.get_descendants())}
     leaves = []
 
     if kde is None:
-        kde = _load_kde()
+        kde, ecoli_mean_subsize = _load_kde()
 
     samples = kde.resample(2)
     gains = 10**samples[0]
@@ -58,12 +71,48 @@ def synth_mutual_4state_nosim(dir, t, mod, kde=None, bl_stats=None):
     root_state = int(f'{root_state_bits[1]:0b}{root_state_bits[0]:0b}', 2)
 
     if bl_stats is None:
-        _, bl = _compute_bl_stats(t)
-    else:
-        _, bl = bl_stats
+        bl_stats = _compute_bl_stats(t)
+    upper_bound, _ = bl_stats
 
-    gain_rates = gains * 0.00603 / bl
-    loss_rates = losses * 0.00603 / bl
+    # IQR-filtered total branch length of the new tree (cap outlier branches)
+    total_bl = sum(
+        min(n.dist, upper_bound)
+        for n in t.traverse()
+        if not n.is_root() and n.dist > 0
+    )
+
+    # Rate scaling: preserve expected transition count from E. coli calibration.
+    # KDE samples gains = gains_flow / gain_subsize_marginal_thresh
+    #   (rate per E. coli subtree-BL unit).
+    # Expected gains on E. coli ≈ gains * ecoli_mean_subsize.
+    # For new tree: gain_rate = gains * ecoli_mean_subsize / new_total_bl.
+    # if ecoli_mean_subsize is not None and total_bl > 0:
+    #     gain_rates = gains * ecoli_mean_subsize / (total_bl / 2) # approximation that half the tree is present and other half is absent 
+    #     loss_rates = losses * ecoli_mean_subsize / (total_bl / 2)
+    # else:
+    #     # Fallback for legacy KDE without scaling metadata
+    _, bl_mean = bl_stats
+    gain_rates = gains * 0.00603 / bl_mean
+    loss_rates = losses * 0.00603 / bl_mean
+
+    # Prevalence-preserving rate compensation.
+    # Scale base rates so the effective marginal rates (averaged over the
+    # partner trait's null prevalence) equal the KDE-sampled rates.
+    # For dir=0: M_g = M_l = 1  =>  denominators = 1  =>  no change.
+    M_g = 10 ** (mod * dir)
+    M_l = 10 ** (-mod * dir)
+
+    p1 = gain_rates[0] / (gain_rates[0] + loss_rates[0])
+    p2 = gain_rates[1] / (gain_rates[1] + loss_rates[1])
+
+    gain_rates = np.array([
+        gain_rates[0] / (1.0 + (M_g - 1.0) * p2),
+        gain_rates[1] / (1.0 + (M_g - 1.0) * p1),
+    ])
+    loss_rates = np.array([
+        loss_rates[0] / (1.0 + (M_l - 1.0) * p2),
+        loss_rates[1] / (1.0 + (M_l - 1.0) * p1),
+    ])
 
     gain_modifier = [10 ** (-mod), 1, 10 ** (mod)]
     loss_modifier = [10 ** (mod), 1, 10 ** (-mod)]
@@ -91,7 +140,10 @@ def synth_mutual_4state_nosim(dir, t, mod, kde=None, bl_stats=None):
 
         parent_state = sim[node_map[node.up], 0]
         curr_state = parent_state
-        t_remaining = node.dist
+        branch_t = node.dist
+        if gamma_alpha is not None and branch_t > 0:
+            branch_t = branch_t * np.random.gamma(gamma_alpha, 1.0 / gamma_alpha)
+        t_remaining = branch_t
 
         while t_remaining > 0:
             rate_out = -Q[curr_state, curr_state]
@@ -121,24 +173,25 @@ def synth_mutual_4state_nosim(dir, t, mod, kde=None, bl_stats=None):
 
     return lineages, prev, gains.tolist(), losses.tolist(), np.zeros(2), leaves
 
-def synth_directional(dir, t, mod, kde=None, bl_stats=None):
+def synth_directional(dir, t, mod, kde=None, bl_stats=None, ecoli_mean_subsize=None):
     """
     Simulate a directional (asymmetric) pair of traits under a 4-state CTMC model.
 
     Parameters
     ----------
-    dir      : -1, 0, or 1 — direction of association
-    t        : ete3 Tree
-    mod      : effect size modifier (log10 scale)
-    kde      : pre-loaded KDE model (optional; loaded from disk if None)
-    bl_stats : (upper_bound, bl_mean) tuple from _compute_bl_stats (optional; computed if None)
+    dir               : -1, 0, or 1 — direction of association
+    t                 : ete3 Tree
+    mod               : effect size modifier (log10 scale)
+    kde               : pre-loaded KDE object (optional; loaded from disk if None)
+    bl_stats          : (upper_bound, bl_mean) tuple from _compute_bl_stats (optional)
+    ecoli_mean_subsize: float — scaling reference from build_kde.py (optional)
     """
     num_nodes = len(t.get_descendants()) + 1
     node_map = {node: idx for idx, node in enumerate([t] + t.get_descendants())}
     leaves = []
 
     if kde is None:
-        kde = _load_kde()
+        kde, ecoli_mean_subsize = _load_kde()
 
     samples = kde.resample(2)
     gains = 10**samples[0]
@@ -147,12 +200,22 @@ def synth_directional(dir, t, mod, kde=None, bl_stats=None):
     root_state = int(f'{root_state_bits[1]:0b}{root_state_bits[0]:0b}', 2)
 
     if bl_stats is None:
-        _, bl = _compute_bl_stats(t)
-    else:
-        _, bl = bl_stats
+        bl_stats = _compute_bl_stats(t)
+    upper_bound, _ = bl_stats
 
-    gain_rates = gains * 0.00603 / bl
-    loss_rates = losses * 0.00603 / bl
+    total_bl = sum(
+        min(n.dist, upper_bound)
+        for n in t.traverse()
+        if not n.is_root() and n.dist > 0
+    )
+
+    if ecoli_mean_subsize is not None and total_bl > 0:
+        gain_rates = gains * ecoli_mean_subsize / total_bl
+        loss_rates = losses * ecoli_mean_subsize / total_bl
+    else:
+        _, bl_mean = bl_stats
+        gain_rates = gains * 0.00603 / bl_mean
+        loss_rates = losses * 0.00603 / bl_mean
 
     gain_modifier = [10 ** (-mod), 1, 10 ** (mod)]
     loss_modifier = [10 ** (mod), 1, 10 ** (-mod)]

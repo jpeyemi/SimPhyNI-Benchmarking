@@ -1,4 +1,3 @@
-name: scoary-2
 channels:
   - conda-forge
   - bioconda

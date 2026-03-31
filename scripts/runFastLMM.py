@@ -1,206 +1,129 @@
-#%%
-import pandas as pd
+#!/usr/bin/env python
+"""
+Run PySEER (FastLMM) in native GWAS mode: one phenotype vs all genotypes.
+
+Inputs:
+  --trait_file  : Reformatted binary trait CSV (samples × traits)
+  --working_dir : Scratch directory for temp files
+  --kinship     : Phylogenetic similarity matrix (from phylogeny_distance.py)
+  --pair_labels : CSV with columns trait1, trait2, direction (from generateData)
+  --outfile     : Output CSV path
+
+For each of the 1200 traits as phenotype, pyseer is run with all other traits
+as genotypes.  Results are aggregated and evaluated against pair_labels.
+
+Output schema:
+  phenotype, genotype, beta, lrt-pvalue, label
+  (label = direction from pair_labels for the (phenotype, genotype) pair,
+   or NaN if the pair is not in pair_labels)
+"""
+
+import argparse
 import os
 import subprocess
 import numpy as np
-import argparse
-import glob
-from sklearn.metrics import classification_report
+import pandas as pd
+from io import StringIO
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import shutil
 import tempfile
 
-#%%
-parser = argparse.ArgumentParser(description="Run PySEER analysis with FastLMM.")
-parser.add_argument("--trait_file", required=True, help="Path to the trait annotation file.")
-parser.add_argument("--working_dir", required=True, help="Directory to store results.")
-parser.add_argument("--kinship_file", required=True, help="Path to the kinship similarity matrix.")
-parser.add_argument("--outfile", required=True, help="Final Output filename")
-
+parser = argparse.ArgumentParser(description="Run PySEER FastLMM in GWAS mode.")
+parser.add_argument("--trait_file",  required=True, help="Path to the trait annotation file.")
+parser.add_argument("--working_dir", required=True, help="Directory to store scratch files.")
+parser.add_argument("--kinship",     required=True, help="Path to the kinship similarity matrix.")
+parser.add_argument("--pair_labels", required=True, help="Path to pair_labels.csv.")
+parser.add_argument("--outfile",     required=True, help="Final output filename.")
 args = parser.parse_args()
 
-trait_file = args.trait_file
-working_dir = args.working_dir
-kinship_file = args.kinship_file
-outfile = args.outfile
+os.makedirs(args.working_dir, exist_ok=True)
+os.makedirs(os.path.dirname(args.outfile), exist_ok=True)
 
-os.makedirs(working_dir, exist_ok=True)
+df           = pd.read_csv(args.trait_file, index_col=0)
+pair_labels  = pd.read_csv(args.pair_labels)
+kinship_file = args.kinship
 
-#%%
-df = pd.read_csv(trait_file, index_col=0)
-columns = df.columns
+# Build pair-label lookup: frozenset({t1, t2}) → direction
+pair_label_lookup = {
+    frozenset({str(r["trait1"]), str(r["trait2"])}): int(r["direction"])
+    for _, r in pair_labels.iterrows()
+}
 
-#%%
-from io import StringIO
+# Build per-phenotype genotype lists from pair_labels only
+pheno_to_genos: dict[str, list[str]] = {}
+for _, r in pair_labels.iterrows():
+    t1, t2 = str(r["trait1"]), str(r["trait2"])
+    pheno_to_genos.setdefault(t1, []).append(t2)
+    pheno_to_genos.setdefault(t2, []).append(t1)
 
-def run_pyseer_pair(col1, col2):
-    # Create temp files for inputs
-    with tempfile.NamedTemporaryFile(mode='w', delete=True) as temp_pheno, \
-         tempfile.NamedTemporaryFile(mode='w', delete=True) as temp_pres:
 
-        df[[col2]].to_csv(temp_pheno.name, sep='\t', header=False)
-        df[[col1]].reset_index().rename(lambda x: "Gene" if x == 'index' else x).transpose().to_csv(temp_pres.name, sep='\t', header=False)
+def run_pyseer_single(pheno_col: str) -> pd.DataFrame:
+    """Run pyseer with pheno_col as phenotype vs its paired genotypes only."""
+    geno_cols = pheno_to_genos.get(pheno_col, [])
 
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as pheno_f, \
+         tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as pres_f:
+
+        pheno_path = pheno_f.name
+        pres_path  = pres_f.name
+
+        # Phenotype file: sample<TAB>value (no header)
+        df[[pheno_col]].to_csv(pheno_path, sep='\t', header=False)
+
+        # Presence/absence file: rows = variants (traits), cols = samples
+        geno_df = df[geno_cols].T.reset_index()
+        geno_df.rename(columns={"index": "Gene"}, inplace=True)
+        geno_df.to_csv(pres_path, sep='\t', index=False)
+
+    try:
         pyseer_cmd = [
             'pyseer',
-            '--phenotypes', temp_pheno.name,
-            '--pres', temp_pres.name,
+            '--phenotypes', pheno_path,
+            '--pres',       pres_path,
             '--similarity', kinship_file,
-            '--lmm'
+            '--lmm',
         ]
-
-        # Run pyseer and capture STDOUT directly
         result = subprocess.run(pyseer_cmd, text=True, capture_output=True, check=True)
+        out_df = pd.read_csv(StringIO(result.stdout), sep='\t')
+        out_df["phenotype"] = pheno_col
+        if "variant" in out_df.columns:
+            out_df = out_df.rename(columns={"variant": "genotype"})
+        return out_df[["phenotype", "genotype", "beta", "lrt-pvalue"]]
+    except subprocess.CalledProcessError as e:
+        print(f"  pyseer failed for phenotype {pheno_col}: {e.stderr[:200]}", flush=True)
+        return pd.DataFrame()
+    finally:
+        os.unlink(pheno_path)
+        os.unlink(pres_path)
 
-        # Read pyseer output directly into pandas
-        pyseer_output = pd.read_csv(StringIO(result.stdout), sep='\t')
-        pyseer_output['Trait'] = col1
-        return pyseer_output
 
-# def run_pyseer_pair(col1, col2):
-#     temp_phenotype_file = os.path.join(working_dir, f'phenotypes_{col1}_{col2}.txt')
-#     temp_file = os.path.join(working_dir, f'pres_{col1}_{col2}.txt')
-#     output_file = os.path.join(working_dir, f'pyseer_{col1}_{col2}.txt')
-
-#     df[[col1]].to_csv(temp_phenotype_file, sep='\t', header=False)
-#     pd.DataFrame(df[[col2]]).reset_index().rename(lambda x: "Gene" if x == 'index' else x).transpose().to_csv(temp_file, sep='\t', header=False)
-
-#     pyseer_cmd = [
-#         'pyseer',
-#         '--phenotypes', temp_phenotype_file,
-#         '--pres', temp_file,
-#         '--similarity', kinship_file,
-#         '--lmm',
-#     ]
-
-#     try:
-#         result = subprocess.run(pyseer_cmd, text=True, check=True, stdout=subprocess.PIPE)
-#         with open(output_file, 'w') as f:
-#             f.write(result.stdout)
-#         os.remove(temp_file)
-#         os.remove(temp_phenotype_file)
-#         print(f"Completed: {col1}, {col2}")
-#     except subprocess.CalledProcessError as e:
-#         print(f"Error for {col1}, {col2}: {e.stderr}",flush=True)
-
-#%%
-trait_pairs = [(columns[i], columns[i + 1]) for i in range(0, len(columns) - 1, 2)]
+pheno_list = list(pheno_to_genos.keys())
+print(f"Running pyseer for {len(pheno_list)} phenotypes (pair_labels only)...", flush=True)
 
 results = []
-
 with ProcessPoolExecutor() as executor:
-    futures = {executor.submit(run_pyseer_pair, c1, c2): (c1, c2) for c1, c2 in trait_pairs}
-    for future in as_completed(futures):
-        c1, c2 = futures[future]
+    futures = {executor.submit(run_pyseer_single, col): col for col in pheno_list}
+    for i, future in enumerate(as_completed(futures), 1):
+        col = futures[future]
         try:
-            results.append(future.result())
-            print(f"Completed: {c1}, {c2}")
+            res = future.result()
+            if not res.empty:
+                results.append(res)
         except Exception as e:
-            print(f"Error in {c1}, {c2}: {e}")
+            print(f"  Error for phenotype {col}: {e}", flush=True)
+        if i % 100 == 0:
+            print(f"  Completed {i}/{len(pheno_list)} phenotypes", flush=True)
 
-agg = pd.concat(results, ignore_index=True)
-expected_traits = [f'synth_trait_{i}' for i in range(0,7200,2)]
-present_traits = set(agg['Trait'])
-missing_traits = set(expected_traits) - present_traits
-if missing_traits:
-    missing_df = pd.DataFrame({
-        'Trait': list(missing_traits),
-        'beta': 0,
-        'lrt-pvalue': 1,
-    })
-    agg = pd.concat([agg, missing_df], ignore_index=True)
+if not results:
+    print("WARNING: no pyseer results collected.", flush=True)
+    pd.DataFrame(columns=["phenotype", "genotype", "beta", "lrt-pvalue", "label"]).to_csv(
+        args.outfile, index=False)
+else:
+    agg = pd.concat(results, ignore_index=True)
 
-agg['order'] = agg['Trait'].str.extract(r'(\d+)$').astype(int)
-agg.sort_values(by='order', inplace=True)
-agg.to_csv(args.outfile, index=False)
+    def get_label(row):
+        key = frozenset({str(row["phenotype"]), str(row["genotype"])})
+        return pair_label_lookup.get(key, np.nan)
 
-# Evaluate Performance
-agg['pred'] = agg['beta'].apply(lambda x: 1 if x > 0 else -1)
-labels = np.array([0]*3000 + [-1]*300 + [1]*300)
-filtered_preds = np.where(agg['lrt-pvalue'] < 0.05, agg['pred'], 0)
-
-from sklearn.metrics import classification_report
-report = classification_report(labels, filtered_preds, target_names=['Negative', 'None', 'Positive'])
-print(report)
-
-with open(os.path.join(os.path.dirname(args.outfile), 'classification_report_fastlmm.txt'), 'w') as f:
-    f.write(report)
-    
-
-# Run in parallel
-# with ProcessPoolExecutor() as executor:
-#     executor.map(lambda pair: run_pyseer_pair(*pair), trait_pairs)
-
-# with ProcessPoolExecutor() as executor:
-#     futures = {executor.submit(run_pyseer_pair, col1, col2): (col1, col2) for col1, col2 in trait_pairs}
-#     for future in as_completed(futures):
-#         col1, col2 = futures[future]
-#         try:
-#             future.result()  # Will raise if the process errored
-#         except Exception as e:
-#             print(f"Exception in ({col1}, {col2}): {e}", flush=True)
-
-# print("All PySEER FastLMM processes completed.")
-
-# #%%
-# def aggregate(path_prefix, output_csv):
-#     files = glob.glob(f"{path_prefix}*.txt")
-#     dataframes = []
-#     for file in files:
-#         try:
-#             df = pd.read_csv(file, sep='\t', encoding='utf-8')
-#             df['source_file'] = os.path.basename(file)
-#             dataframes.append(df)
-#         except Exception as e:
-#             print(f"Skipping {file}: {e}")
-
-#     if dataframes:
-#         expected_traits = [f'synth_trait_{i}' for i in range(0,7200,2)]
-#         aggregated_df = pd.concat(dataframes, ignore_index=True)
-#         aggregated_df['Trait'] = aggregated_df['variant'].astype(str).str.extract(r'(\d+)$').astype(int) - 1
-#         aggregated_df['Trait'] = 'synth_trait_' + aggregated_df['Trait'].astype(str)
-#         aggregated_df = aggregated_df[['Trait'] + [col for col in aggregated_df.columns if col != 'Trait']]
-#         present_traits = set(aggregated_df['Trait'])
-#         missing_traits = set(expected_traits) - present_traits
-#         if missing_traits:
-#             missing_df = pd.DataFrame({
-#                 'Trait': list(missing_traits),
-#                 'beta': 0,
-#                 'lrt-pvalue': 1,
-#             })
-#             aggregated_df = pd.concat([aggregated_df, missing_df], ignore_index=True)
-#         aggregated_df['order'] = aggregated_df['Trait'].astype(str).str.extract(r'(\d+)$').astype(int)
-#         aggregated_df = aggregated_df.sort_values(by='order', ascending = True)
-#         aggregated_df.to_csv(output_csv, index=False)
-#         print(f"Aggregated {len(files)} files into {output_csv}")
-#     else:
-#         print("No valid files found.")
-
-# aggregate(os.path.join(working_dir,"pyseer"), outfile)
-
-# #%%
-# res = pd.read_csv(outfile)
-# res['pred'] = [1 if i > 0 else -1 for i in res['beta']]
-# labels = [0]*3000 + [-1]*300 + [1]*300
-# predictions = np.array(res['pred'])
-# pvalues = res['lrt-pvalue'].fillna(1)
-# labels = np.array(labels)
-# significance_threshold = 0.05
-# filtered_predictions = np.array([pred if pval < significance_threshold else 0 for pred, pval in zip(predictions, pvalues)])
-
-# report = classification_report(labels, filtered_predictions, target_names=['Negative', 'None', 'Positive'])
-# print('Params: ')
-# print(report)
-
-# with open(os.path.join(os.path.dirname(outfile),'classification_report_fastlmm.txt'), 'w') as file:
-#     file.write("Classification Report:\n")
-#     file.write(report)
-
-# res['labels'] = labels
-# res.to_csv(outfile)
-
-# # Cleanup
-# if os.path.exists(working_dir):
-#     shutil.rmtree(working_dir)
-#     print(f'Deleted the directory: {working_dir}')
-# # %%
+    agg["label"] = agg.apply(get_label, axis=1)
+    agg.to_csv(args.outfile, index=False)
+    print(f"Saved FastLMM results to {args.outfile} ({len(agg)} rows)", flush=True)

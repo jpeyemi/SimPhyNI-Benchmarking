@@ -1,49 +1,67 @@
-import pandas as pd
-import numpy as np
+#!/usr/bin/env python
+"""
+Run Scoary2 on labeled trait pairs.
+
+Inputs (CLI):
+  --systems     : Reformatted binary trait CSV (samples × traits)
+  --tree        : Reformatted Newick tree file
+  --pair_labels : CSV with columns trait1, trait2, direction
+  --outfile     : Output CSV path
+
+For each labeled pair (trait1, trait2) in pair_labels:
+  - trait2 acts as the "genotype" (genes file, transposed)
+  - trait1 acts as the "phenotype"
+  - scoary2 evaluates whether the gene is associated with the phenotype
+
+Output: aggregated scoary2 results with ground-truth label column.
+"""
+
+import argparse
+import os
 import subprocess
 import tempfile
-import os
-import sys
 import glob
-import re
-from sklearn.metrics import classification_report
+import numpy as np
+import pandas as pd
 from joblib import Parallel, delayed
-import shutil
-from io import StringIO
 
-tree = sys.argv[-2]
-obs_data_path = sys.argv[-3]
-outfile = sys.argv[-1]
-outdir = os.path.dirname(outfile)
+parser = argparse.ArgumentParser(description="Run Scoary2 on labeled trait pairs.")
+parser.add_argument("--systems",     required=True)
+parser.add_argument("--tree",        required=True)
+parser.add_argument("--pair_labels", required=True)
+parser.add_argument("--outfile",     required=True)
+args = parser.parse_args()
+
+outdir = os.path.dirname(args.outfile)
 os.makedirs(outdir, exist_ok=True)
 
-data = pd.read_csv(obs_data_path, index_col=0)
+data        = pd.read_csv(args.systems, index_col=0)
+pair_labels = pd.read_csv(args.pair_labels)
+tree        = args.tree
 
-def run_scoary(i):
-    trait1 = data.columns[i]
-    trait2 = data.columns[i + 1]
 
+def run_scoary_pair(trait1, trait2, label):
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Create a unique subdirectory within the temporary directory
         scoary_outdir = os.path.join(tmpdir, "scoary_output")
-        # os.makedirs(scoary_outdir, exist_ok=False)
 
         t1_path = os.path.join(tmpdir, "t1.csv")
         t2_path = os.path.join(tmpdir, "t2.csv")
 
+        # Phenotype: trait1
         data[[trait1]].to_csv(t1_path)
+        # Genes: trait2 transposed (one gene per row)
         data[[trait2]].transpose().to_csv(t2_path)
 
-        scoary_cmd = f"""
-        scoary2 --genes {t2_path} \
-                --gene-data-type gene-count:, \
-                --traits {t1_path} \
-                --outdir {scoary_outdir} \
-                --n-permut 1000 \
-                --newicktree={tree}
-        """
-
-        subprocess.run(scoary_cmd, shell=True, executable="/bin/bash")
+        scoary_cmd = (
+            f"scoary2 --genes {t2_path} "
+            f"--gene-data-type gene-count:, "
+            f"--traits {t1_path} "
+            f"--outdir {scoary_outdir} "
+            f"--n-permut 1000 "
+            f"--newicktree={tree}"
+        )
+        subprocess.run(scoary_cmd, shell=True, executable="/bin/bash",
+                       capture_output=True)
 
         result_path = glob.glob(f'{scoary_outdir}/traits/*/result.tsv')
         if not result_path:
@@ -52,28 +70,22 @@ def run_scoary(i):
         res_df = pd.read_csv(result_path[0], sep='\t')
         res_df['trait1'] = trait1
         res_df['trait2'] = trait2
+        res_df['label']  = label
         return res_df
 
 
-results = Parallel(n_jobs=-1)(delayed(run_scoary)(i) for i in range(0, data.shape[1], 2))
+results = Parallel(n_jobs=-1)(
+    delayed(run_scoary_pair)(
+        str(row["trait1"]), str(row["trait2"]), int(row["direction"])
+    )
+    for _, row in pair_labels.iterrows()
+)
 results = [r for r in results if r is not None]
 
-agg = pd.concat(results, ignore_index=True)
-
-agg['num'] = agg['Gene'].str.extract(r'_(\d+)$').astype(int)
-agg.sort_values(by='num', inplace=True)
-agg['pred'] = agg['odds_ratio'].apply(lambda x: 1 if x > 1 else -1)
-
-labels = np.array([0]*3000 + [-1]*300 + [1]*300)
-predictions = agg['pred'].values
-pvalues = agg['empirical_p'].fillna(1).values
-filtered_preds = np.where(pvalues < 0.05, predictions, 0)
-
-report = classification_report(labels, filtered_preds, target_names=['Negative', 'None', 'Positive'])
-print(report)
-
-with open(os.path.join(outdir, 'classification_report_scoary.txt'), 'w') as f:
-    f.write(report)
-
-agg['labels'] = labels
-agg.to_csv(outfile, index=False)
+if results:
+    agg = pd.concat(results, ignore_index=True)
+    agg.to_csv(args.outfile, index=False)
+    print(f"Saved Scoary results to {args.outfile} ({len(agg)} rows)")
+else:
+    print("WARNING: no Scoary results collected.")
+    pd.DataFrame(columns=["trait1", "trait2", "label"]).to_csv(args.outfile, index=False)

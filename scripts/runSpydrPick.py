@@ -1,17 +1,19 @@
 #!/usr/bin/env python
 """
-Run SpydrPick on synthetic data and extract results for consecutive trait pairs.
+Run SpydrPick on synthetic data and evaluate against known pair labels.
 
 Inputs:
-  --systems : Reformatted binary trait CSV (samples × traits, 0/1)
-  --outfile : Output CSV path
+  --systems     : Reformatted binary trait CSV (samples × traits, 0/1)
+  --pair_labels : CSV with columns trait1, trait2, direction (from generateData)
+  --outfile     : Output CSV path
 
-Pair setup: consecutive pairs (0,1), (2,3), ... matching synthetic data structure.
-Classification labels: [0]*3000 + [-1]*300 + [1]*300
+SpydrPick computes mutual information (MI) for all position pairs in a FASTA
+alignment.  We convert binary traits to FASTA (0→A, 1→T), run SpydrPick on
+all pairs with --no-filter-alignment to disable position-based filtering
+(appropriate since our FASTA columns are synthetic binary traits with no
+meaningful genomic coordinates), extract MI for each labeled pair, and compute
+empirical p-values from the full MI distribution.
 
-SpydrPick computes mutual information (MI) for all position pairs in a FASTA alignment.
-We convert binary traits to FASTA (0→A, 1→T), run SpydrPick on all pairs, extract MI
-for our consecutive pairs, and compute empirical p-values from the full MI distribution.
 Direction is inferred from the observed log-odds ratio (SpydrPick is undirected).
 """
 
@@ -27,8 +29,9 @@ import pandas as pd
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run SpydrPick on synthetic trait data.")
-    parser.add_argument("--systems", required=True, help="Path to binary trait CSV (samples × traits)")
-    parser.add_argument("--outfile", required=True, help="Output CSV path")
+    parser.add_argument("--systems",     required=True, help="Path to binary trait CSV (samples × traits)")
+    parser.add_argument("--pair_labels", required=True, help="Path to pair_labels.csv")
+    parser.add_argument("--outfile",     required=True, help="Output CSV path")
     return parser.parse_args()
 
 
@@ -67,26 +70,28 @@ def main():
     args = parse_args()
     os.makedirs(os.path.dirname(args.outfile), exist_ok=True)
 
-    data = pd.read_csv(args.systems, index_col=0)
-    n_traits = data.shape[1]
+    data        = pd.read_csv(args.systems, index_col=0)
+    pair_labels = pd.read_csv(args.pair_labels)
+    n_traits    = data.shape[1]
     n_pairs_total = n_traits * (n_traits - 1) // 2
+
+    cols = list(data.columns)
+    col_to_pos = {col: i + 1 for i, col in enumerate(cols)}  # 1-based positions
 
     with tempfile.TemporaryDirectory() as tmpdir:
         fasta_path = os.path.join(tmpdir, "traits.fasta")
         csv_to_fasta(data, fasta_path)
 
-        # Run SpydrPick on all pairs
-        # --ld-threshold 0    : include all pairs regardless of positional distance
-        # --mi-values         : output ALL pair MI values for empirical p-value computation
-        # --linear-genome     : traits are not on a circular chromosome
-        # --maf-threshold 0   : do not filter any traits based on frequency
-        # --no-aracne         : skip ARACNE post-processing (we want raw MI for all pairs)
+        # --no-filter-alignment : disable all position-based filtering
+        #   (our FASTA columns have no meaningful genomic coordinates)
+        # --mi-values           : output ALL pair MI values for empirical p-value
+        # --maf-threshold 0     : do not filter traits by minor allele frequency
+        # --no-aracne           : skip ARACNE post-processing (want raw MI)
         cmd = [
             "SpydrPick",
             "-v", fasta_path,
-            "--ld-threshold", "0",
+            "--no-filter-alignment",
             "--mi-values", str(n_pairs_total),
-            "--linear-genome",
             "--maf-threshold", "0",
             "--no-aracne",
         ]
@@ -103,14 +108,15 @@ def main():
             )
         edge_file = edge_files[0]
 
-        # Parse output: whitespace-delimited columns pos1 pos2 genome_distance ARACNE MI
-        # Positions are 1-based. Stream through file to build:
-        #   1. mi_lookup: {(pos1, pos2): MI} for consecutive pairs
-        #   2. all_mi: list of all MI values for empirical distribution
-        consecutive_set = set()
-        for i in range(0, n_traits, 2):
-            consecutive_set.add((i + 1, i + 2))  # 1-based
+        # Build labeled-pair lookup set for efficient lookup
+        labeled_pairs = set()
+        for _, row in pair_labels.iterrows():
+            t1, t2 = str(row["trait1"]), str(row["trait2"])
+            if t1 in col_to_pos and t2 in col_to_pos:
+                p1, p2 = col_to_pos[t1], col_to_pos[t2]
+                labeled_pairs.add((min(p1, p2), max(p1, p2)))
 
+        # Parse edges: columns are pos1 pos2 genome_distance ARACNE MI
         mi_lookup = {}
         all_mi = []
 
@@ -126,52 +132,48 @@ def main():
                 mi = float(parts[4])
                 all_mi.append(mi)
                 key = (min(pos1, pos2), max(pos1, pos2))
-                if key in consecutive_set:
+                if key in labeled_pairs:
                     mi_lookup[key] = mi
 
     all_mi = np.array(all_mi)
     n_total = len(all_mi)
+    print(f"SpydrPick: {n_total} total pairs computed, "
+          f"{len(mi_lookup)} labeled pairs found in output.", flush=True)
 
-    # Build results for consecutive pairs
-    n_consecutive = n_traits // 2
-    labels = [0] * 3000 + [-1] * 300 + [1] * 300
-    if n_consecutive != len(labels):
-        raise ValueError(
-            f"Expected {len(labels)} consecutive pairs, got {n_consecutive}. "
-            "Check synthetic data structure (should be 3600 traits → 1800 pairs)."
-        )
-
-    cols = list(data.columns)
     rows = []
-    for idx in range(n_consecutive):
-        i = idx * 2
-        trait1 = cols[i]
-        trait2 = cols[i + 1]
-        pos1, pos2 = i + 1, i + 2  # 1-based
+    for _, pl_row in pair_labels.iterrows():
+        trait1    = str(pl_row["trait1"])
+        trait2    = str(pl_row["trait2"])
+        label     = int(pl_row["direction"])
 
-        key = (min(pos1, pos2), max(pos1, pos2))
+        if trait1 not in col_to_pos or trait2 not in col_to_pos:
+            rows.append({"trait1": trait1, "trait2": trait2,
+                         "mi_score": np.nan, "p_value": 1.0,
+                         "direction": 0, "label": label})
+            continue
+
+        p1, p2 = col_to_pos[trait1], col_to_pos[trait2]
+        key    = (min(p1, p2), max(p1, p2))
         mi_val = mi_lookup.get(key, np.nan)
 
-        if np.isnan(mi_val):
-            # Pair not in SpydrPick output → assign worst p-value
-            p_value = 1.0
+        if np.isnan(mi_val) or n_total == 0:
+            p_value   = 1.0
             direction = 0
         else:
-            # Empirical p-value: fraction of all pairs with MI >= this value
             p_value = float(np.sum(all_mi >= mi_val) / n_total)
             lor = compute_log_odds_ratio(
-                data.iloc[:, i].values,
-                data.iloc[:, i + 1].values,
+                data[trait1].values,
+                data[trait2].values,
             )
             direction = 1 if lor > 0 else -1
 
         rows.append({
-            'trait1':    trait1,
-            'trait2':    trait2,
-            'mi_score':  mi_val,
-            'p_value':   p_value,
-            'direction': direction,
-            'label':     labels[idx],
+            "trait1":    trait1,
+            "trait2":    trait2,
+            "mi_score":  mi_val,
+            "p_value":   p_value,
+            "direction": direction,
+            "label":     label,
         })
 
     res = pd.DataFrame(rows)

@@ -1,0 +1,14 @@
+num_pairs: 10
+effect_sizes: [1]
+msprime_target_leaves: 500
+
+# Fixed trees (name -> relative path from project root)
+fixed_trees:
+  Escherichia_coli: inputs/species_trees/Escherichia_coli.nwk
+
+num_msprime_main: 2        # generates msprime_0 only
+
+d_statistic:
+  n_permutations: 999
+  d_low_threshold: -0.05    # D_pair ≤ this → low_independence (clade-driven)
+  d_high_threshold: 0.05    # D_pair > this → high_independence
