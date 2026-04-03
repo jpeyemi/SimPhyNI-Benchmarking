@@ -33,8 +33,8 @@ print(paste("Traits file:", traits_file))
 print(paste("Pair labels file:", pair_labels_file))
 
 # Read inputs
-tree       <- read.tree(file = tree_file)
-gene_data  <- as.matrix(read.csv(traits_file, row.names = 1))
+tree        <- read.tree(file = tree_file)
+gene_data   <- as.matrix(read.csv(traits_file, row.names = 1))
 pair_labels <- read.csv(pair_labels_file, stringsAsFactors = FALSE)
 
 # Ensure output directories exist
@@ -52,8 +52,60 @@ make_key <- function(t1, t2) paste(sort(c(t1, t2)), collapse = "|||")
 pair_key_vec <- mapply(make_key, pair_labels$trait1, pair_labels$trait2)
 label_lookup <- setNames(pair_labels$direction, pair_key_vec)
 
-# Helper: extract significant hits for a given phenotype column and return results
-# filtered to only labeled pairs involving this phenotype.
+# Pre-filter to binary traits before dispatching parallel work
+binary_mask    <- apply(gene_data, 2, function(col) length(unique(col[!is.na(col)])) == 2)
+binary_indices <- which(binary_mask)
+message(paste0("Binary traits: ", length(binary_indices), " / ", num_traits))
+
+# ---------------------------------------------------------------------------
+# PRECOMPUTE tree-dependent quantities once (shared across all phenotype runs)
+# ---------------------------------------------------------------------------
+# These objects depend only on gene_data + tree, which never change across
+# the 600 per-phenotype treeWAS() calls.  Passing them in avoids recomputing
+# ancestral state reconstruction and null-distribution simulation each time.
+
+# Resolve whether treeWAS exports asr / get.fitch.n.mts / snp.sim, falling
+# back to the namespace if they are internal.
+.asr <- if (existsFunction("asr")) asr else treeWAS:::asr
+.fitch <- if (existsFunction("get.fitch.n.mts")) get.fitch.n.mts else treeWAS:::get.fitch.n.mts
+.snp_sim <- if (existsFunction("snp.sim")) snp.sim else treeWAS:::snp.sim
+
+message("Precomputing SNP ancestral state reconstruction (shared across all phenotypes)...")
+snps_recon <- tryCatch(
+  .asr(snps = gene_data, tree = tree, type = "parsimony", method = "discrete"),
+  error = function(e) { message("asr() failed, will let treeWAS compute per call: ", e$message); NULL }
+)
+
+message("Precomputing Fitch parsimony scores...")
+n_subs <- tryCatch(
+  .fitch(snps = gene_data, tree = tree),
+  error = function(e) { message("get.fitch.n.mts() failed, will let treeWAS compute per call: ", e$message); NULL }
+)
+
+snps_sim_recon <- NULL
+if (!is.null(n_subs)) {
+  message("Simulating null SNP set and reconstructing ancestral states...")
+  n_snps_sim <- max(10L * ncol(gene_data), 10000L)
+  snps_sim_recon <- tryCatch({
+    sim_snps <- .snp_sim(tree = tree, n.snps.sim = n_snps_sim, n.subs = n_subs)
+    .asr(snps = sim_snps, tree = tree, type = "parsimony", method = "discrete")
+  }, error = function(e) {
+    message("Null simulation precompute failed, will let treeWAS compute per call: ", e$message)
+    NULL
+  })
+}
+
+# Adaptive core count: honour SLURM allocation, fall back to 4
+n_cores <- min(
+  as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", unset = "4")),
+  max(1L, detectCores() - 1L),
+  length(binary_indices)
+)
+message(paste0("Running on ", n_cores, " core(s)"))
+
+# ---------------------------------------------------------------------------
+# Helper: extract significant hits for a given phenotype column
+# ---------------------------------------------------------------------------
 extract_labeled <- function(analysis_result, pheno_name, all_col_names) {
   if (is.null(analysis_result$sig.snps) ||
       identical(analysis_result$sig.snps, "No significant SNPs found.")) return(NULL)
@@ -64,7 +116,7 @@ extract_labeled <- function(analysis_result, pheno_name, all_col_names) {
   rows <- lapply(geno_names, function(geno) {
     key   <- make_key(pheno_name, geno)
     label <- label_lookup[key]
-    if (is.na(label)) return(NULL)  # pair not in pair_labels; skip
+    if (is.na(label)) return(NULL)
     data.frame(
       phenotype = pheno_name,
       genotype  = geno,
@@ -77,28 +129,28 @@ extract_labeled <- function(analysis_result, pheno_name, all_col_names) {
   do.call(rbind, Filter(Negate(is.null), rows))
 }
 
-# Process one phenotype: run treeWAS with this trait as phenotype,
-# all other traits as the gene matrix (background for null distribution).
+# ---------------------------------------------------------------------------
+# Process one phenotype: pass precomputed tree objects to avoid redundant work
+# ---------------------------------------------------------------------------
 process_phenotype <- function(pheno_idx) {
   pheno_name <- gene_colnames[pheno_idx]
   phen       <- gene_data[, pheno_idx]
   names(phen) <- gene_rownames
 
-  # Skip if not binary
-  if (length(unique(phen)) != 2) return(NULL)
-
-  # Use all traits as gene matrix (background); treeWAS handles the pheno internally
   out_list <- tryCatch({
     result <- treeWAS(
       gene_data,
       phen,
-      tree = tree,
-      plot.tree         = FALSE,
-      plot.manhattan    = FALSE,
-      plot.null.dist    = FALSE,
-      phen.type         = "discrete",
-      p.value.correct   = FALSE,
-      p.value           = 1,
+      tree                    = tree,
+      snps.reconstruction     = snps_recon,      # precomputed; NULL = treeWAS recomputes
+      snps.sim.reconstruction = snps_sim_recon,  # precomputed; NULL = treeWAS recomputes
+      n.subs                  = n_subs,          # precomputed; NULL = treeWAS recomputes
+      plot.tree               = FALSE,
+      plot.manhattan          = FALSE,
+      plot.null.dist          = FALSE,
+      phen.type               = "discrete",
+      p.value.correct         = FALSE,
+      p.value                 = 1,
     )
 
     list(
@@ -114,9 +166,8 @@ process_phenotype <- function(pheno_idx) {
   return(out_list)
 }
 
-# Run all phenotypes in parallel
-all_indices <- seq_len(num_traits)
-result_list <- mclapply(all_indices, process_phenotype, mc.cores = 4)
+# Run all binary phenotypes in parallel
+result_list <- mclapply(binary_indices, process_phenotype, mc.cores = n_cores)
 
 # Combine results across all phenotypes
 combined_terminal     <- bind_rows(lapply(result_list, function(x) if (!is.null(x)) x$terminal))

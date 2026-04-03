@@ -17,7 +17,7 @@ fixed_trees:
   # Salmonella_enterica: inputs/species_trees/Salmonella_enterica.nwk
   # Bacillus_subtilis: inputs/species_trees/Bacillus_subtilis.nwk
 
-num_msprime_main: 10        # generates msprime_0, msprime_1, msprime_2
+num_msprime_main: 11        # generates msprime_0, msprime_1, msprime_2
 num_msprime_benchmark: 3   # generates bench_0, bench_1, bench_2 (ACR benchmarking only)
 
 d_statistic:
@@ -27,5 +27,5 @@ d_statistic:
 
 # ACR benchmarking settings
 benchmark_max_workers: 64
-benchmark_n_stability: 32
-benchmark_n_stability_iters: 10   # simulate→reconstruct cycles for stability_trajectory.csv
+benchmark_n_stability: 10
+benchmark_n_stability_iters: 5   # simulate→reconstruct cycles for stability_trajectory.csv

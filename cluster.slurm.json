@@ -24,32 +24,30 @@
         "mem"            : 8000,
     },
     "generateData" : {
-        "time"           : "2:00:00",
-        "mem"            : 32000,
-        "cpus-per-task"  : 8,
+        "time"           : "1:00:00",
+        "mem"            : 8000,
     },
     "generate_benchmark_data" : {
-        "time"           : "2:00:00",
-        "mem"            : 32000,
-        "cpus-per-task"  : 8,
+        "time"           : "1:00:00",
+        "mem"            : 8000,
     },
     "reformat_csv" : {
         "time"           : "0:30:00",
-        "mem"            : 16000,
+        "mem"            : 8000,
     },
     "reformat_tree" : {
         "time"           : "0:30:00",
-        "mem"            : 16000,
+        "mem"            : 8000,
     },
     "ancestral_reconstruction" : {
         "time"           : "3:00:00",
-        "mem"            : 64000,
-        "cpus-per-task"  : 64,
+        "mem"            : 32000,
+        "cpus-per-task"  : 16,
     },
     "simphyni" : {
         "time"           : "3:00:00",
-        "mem"            : 64000,
-        "cpus-per-task"  : 32,
+        "mem"            : 32000,
+        "cpus-per-task"  : 16,
     },
     "acr_benchmark" : {
         "time"           : "12:00:00",
@@ -63,23 +61,23 @@
         "cpus-per-task"  : 4,
     },
     "runScoary" : {
-        "time"           : "6:00:00",
-        "mem"            : 64000,
+        "time"           : "3:00:00",
+        "mem"            : 32000,
         "cpus-per-task"  : 16,
     },
     "runPagel" : {
         "time"           : "9:00:00",
-        "mem"            : 128000,
+        "mem"            : 64000,
         "cpus-per-task"  : 16,
     },
     "run_fastlmm_phy" : {
         "time"           : "4:00:00",
         "mem"            : 32000,
-        "cpus-per-task"  : 16,
+        "cpus-per-task"  : 8,
     },
     "run_fastlmm" : {
         "time"           : "8:00:00",
-        "mem"            : 32000,
+        "mem"            : 64000,
         "cpus-per-task"  : 8,
     },
     "ParamTraversal" : {

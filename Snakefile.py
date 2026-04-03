@@ -103,7 +103,7 @@ rule build_kde:
     output:
         kde = "scripts/kde_model.pkl"
     conda:
-        "envs/py.yaml"
+        "snakemake"
     shell:
         "python scripts/build_kde.py "
         "  --acr  {input.acr} "
