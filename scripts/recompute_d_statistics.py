@@ -104,6 +104,7 @@ def recompute_pair_labels(
     # ── Load data ─────────────────────────────────────────────────────────────
     pl    = pd.read_csv(pair_labels_path)
     synth = pd.read_csv(synth_path, index_col=0)   # rows=leaves, cols=traits
+    synth.index = synth.index.astype(str)          # ensure string keys match ETE3 leaf names
 
     t = Tree(str(tree_path), format=1)
 
