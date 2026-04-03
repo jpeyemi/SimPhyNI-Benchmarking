@@ -96,34 +96,35 @@ def run_pyseer_single(pheno_col: str) -> pd.DataFrame:
         os.unlink(pres_path)
 
 
-pheno_list = list(pheno_to_genos.keys())
-print(f"Running pyseer for {len(pheno_list)} phenotypes (pair_labels only)...", flush=True)
+if __name__ == '__main__':
+    pheno_list = list(pheno_to_genos.keys())
+    print(f"Running pyseer for {len(pheno_list)} phenotypes (pair_labels only)...", flush=True)
 
-results = []
-with ProcessPoolExecutor() as executor:
-    futures = {executor.submit(run_pyseer_single, col): col for col in pheno_list}
-    for i, future in enumerate(as_completed(futures), 1):
-        col = futures[future]
-        try:
-            res = future.result()
-            if not res.empty:
-                results.append(res)
-        except Exception as e:
-            print(f"  Error for phenotype {col}: {e}", flush=True)
-        if i % 100 == 0:
-            print(f"  Completed {i}/{len(pheno_list)} phenotypes", flush=True)
+    results = []
+    with ProcessPoolExecutor() as executor:
+        futures = {executor.submit(run_pyseer_single, col): col for col in pheno_list}
+        for i, future in enumerate(as_completed(futures), 1):
+            col = futures[future]
+            try:
+                res = future.result()
+                if not res.empty:
+                    results.append(res)
+            except Exception as e:
+                print(f"  Error for phenotype {col}: {e}", flush=True)
+            if i % 100 == 0:
+                print(f"  Completed {i}/{len(pheno_list)} phenotypes", flush=True)
 
-if not results:
-    print("WARNING: no pyseer results collected.", flush=True)
-    pd.DataFrame(columns=["phenotype", "genotype", "beta", "lrt-pvalue", "label"]).to_csv(
-        args.outfile, index=False)
-else:
-    agg = pd.concat(results, ignore_index=True)
+    if not results:
+        print("WARNING: no pyseer results collected.", flush=True)
+        pd.DataFrame(columns=["phenotype", "genotype", "beta", "lrt-pvalue", "label"]).to_csv(
+            args.outfile, index=False)
+    else:
+        agg = pd.concat(results, ignore_index=True)
 
-    def get_label(row):
-        key = frozenset({str(row["phenotype"]), str(row["genotype"])})
-        return pair_label_lookup.get(key, np.nan)
+        def get_label(row):
+            key = frozenset({str(row["phenotype"]), str(row["genotype"])})
+            return pair_label_lookup.get(key, np.nan)
 
-    agg["label"] = agg.apply(get_label, axis=1)
-    agg.to_csv(args.outfile, index=False)
-    print(f"Saved FastLMM results to {args.outfile} ({len(agg)} rows)", flush=True)
+        agg["label"] = agg.apply(get_label, axis=1)
+        agg.to_csv(args.outfile, index=False)
+        print(f"Saved FastLMM results to {args.outfile} ({len(agg)} rows)", flush=True)

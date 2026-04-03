@@ -30,7 +30,9 @@ ES_IDX       = list(range(len(EFFECT_SIZES)))
 
 NUM_PAIRS    = config["num_pairs"]
 
-SIMPHYNI_SCRIPTS = os.path.join(os.path.dirname(workflow.snakefile), "SimPhyNI", "simphyni", "scripts")
+SIMPHYNI_SCRIPTS     = os.path.join(os.path.dirname(workflow.snakefile), "SimPhyNI", "simphyni", "scripts")
+BENCHMARK_SCRIPT     = os.path.join(os.path.dirname(workflow.snakefile), "SimPhyNI", "dev", "benchmark_reconstruction.py")
+STABILITY_FAN_SCRIPT = os.path.join(os.path.dirname(workflow.snakefile), "SimPhyNI", "dev", "plot_stability_fan.py")
 
 # ──────────────────────────────────────────────
 # Helpers
@@ -61,10 +63,14 @@ def process_tree(input_tree, output_tree):
 rule all:
     input:
         "scripts/kde_model.pkl",
-        expand("test-results/{tree}/es{es}/simphyni_results.csv",   tree=ALL_TREES, es=ES_IDX),
-        expand("test-results/{tree}/es{es}/scoary_results.csv",     tree=ALL_TREES, es=ES_IDX),
-        expand("test-results/{tree}/es{es}/coinfinder_results.csv", tree=ALL_TREES, es=ES_IDX),
-        expand("test-data/{tree}/es{es}/synth_stats.csv",           tree=ALL_TREES, es=ES_IDX),
+        expand("test-results/{tree}/es{es}/simphyni_results.csv",              tree=ALL_TREES, es=ES_IDX),
+        expand("test-results/{tree}/es{es}/scoary_results.csv",                tree=ALL_TREES, es=ES_IDX),
+        expand("test-results/{tree}/es{es}/coinfinder_results.csv",            tree=ALL_TREES, es=ES_IDX),
+        expand("test-results/{tree}/es{es}/htreewas_terminal.csv",             tree=ALL_TREES, es=ES_IDX),
+        expand("test-results/{tree}/es{es}/fastlmm_results.csv",               tree=ALL_TREES, es=ES_IDX),
+        # expand("test-results/{tree}/es{es}/acr_benchmark/method_ranking.csv",  tree=ALL_TREES, es=ES_IDX),
+        # expand("test-results/{tree}/es{es}/acr_benchmark/stability_fans/.done",tree=ALL_TREES, es=ES_IDX),
+        expand("test-data/{tree}/es{es}/synth_stats.csv",                      tree=ALL_TREES, es=ES_IDX),
 
 
 # ──────────────────────────────────────────────
@@ -121,7 +127,7 @@ rule generateData:
         import numpy as np
         from ete3 import Tree
         from makeSynthData import synth_mutual_4state_nosim, _load_kde, _compute_bl_stats
-        from d_statistic import get_or_calibrate, compute_d_statistic
+        from d_statistic import get_or_calibrate, get_null_distributions, compute_d_statistic
         import os
 
         t           = Tree(input.treefile, format=1)
@@ -136,8 +142,8 @@ rule generateData:
         d_low          = float(d_cfg.get("d_low_threshold", -0.05))
         d_high         = float(d_cfg.get("d_high_threshold",  0.05))
 
-        # Calibrate D-stat nulls once per tree (cached by tree path)
-        tree_structure, random_mean, brownian_mean = get_or_calibrate(
+        # Precompute tree structure and BM vectors once per tree (cached by tree path)
+        tree_structure, bm_leaf_vals = get_or_calibrate(
             input.treefile, t, n_permutations=n_permutations
         )
 
@@ -220,8 +226,10 @@ rule generateData:
             t2   = trait_arrays[col_b_idx].astype(float)
             ord1 = np.array([t1[leaf_order[n]] for n in ts_leaf_names], dtype=float)
             ord2 = np.array([t2[leaf_order[n]] for n in ts_leaf_names], dtype=float)
-            d1   = compute_d_statistic(tree_structure, ord1, random_mean, brownian_mean)
-            d2   = compute_d_statistic(tree_structure, ord2, random_mean, brownian_mean)
+            rm1, bm1 = get_null_distributions(input.treefile, tree_structure, bm_leaf_vals, ord1.mean(), n_permutations)
+            rm2, bm2 = get_null_distributions(input.treefile, tree_structure, bm_leaf_vals, ord2.mean(), n_permutations)
+            d1   = compute_d_statistic(tree_structure, ord1, rm1, bm1)
+            d2   = compute_d_statistic(tree_structure, ord2, rm2, bm2)
             finite = [v for v in (d1, d2) if not np.isnan(v)]
             return d1, d2, (float(max(finite)) if finite else float("nan"))
 
@@ -448,3 +456,119 @@ rule runCoinfinder:
         "  --pair_labels {input.pair_labels} "
         "  --outfile {output.outfile} "
         "  --threads {threads}"
+
+
+# ──────────────────────────────────────────────
+# TreeWAS
+# ──────────────────────────────────────────────
+rule run_htreewas_analysis:
+    input:
+        traits      = "test-formatting/{tree}/es{es}/reformated_systems.csv",
+        tree        = "test-formatting/{tree}/reformated_tree.nwk",
+        pair_labels = "test-formatting/{tree}/es{es}/pair_labels.csv"
+    output:
+        terminal     = "test-results/{tree}/es{es}/htreewas_terminal.csv",
+        simultaneous = "test-results/{tree}/es{es}/htreewas_simultaneous.csv",
+        subsequent   = "test-results/{tree}/es{es}/htreewas_subsequent.csv"
+    conda:
+        "r-env"
+    shell:
+        "Rscript scripts/run_treewas_homo.R "
+        "  --tree {input.tree} "
+        "  --traits {input.traits} "
+        "  --pair_labels {input.pair_labels} "
+        "  --terminal {output.terminal} "
+        "  --simultaneous {output.simultaneous} "
+        "  --subsequent {output.subsequent}"
+
+
+# ──────────────────────────────────────────────
+# FastLMM
+# ──────────────────────────────────────────────
+rule run_fastlmm_phy:
+    input:
+        tree = "test-formatting/{tree}/reformated_tree.nwk"
+    output:
+        outfile = "test-results/{tree}/es{es}/fastlmm/phylogeny_similarity.tsv"
+    params:
+        working_dir = "test-results/{tree}/es{es}/fastlmm"
+    conda:
+        "pyseer"
+    shell:
+        "mkdir -p {params.working_dir} && "
+        "python scripts/phylogeny_distance.py --lmm {input.tree} > {output.outfile}"
+
+
+rule run_fastlmm:
+    input:
+        traits      = "test-formatting/{tree}/es{es}/reformated_systems.csv",
+        tree        = "test-formatting/{tree}/reformated_tree.nwk",
+        phylo       = "test-results/{tree}/es{es}/fastlmm/phylogeny_similarity.tsv",
+        pair_labels = "test-formatting/{tree}/es{es}/pair_labels.csv"
+    output:
+        outfile = "test-results/{tree}/es{es}/fastlmm_results.csv"
+    params:
+        working_dir = "test-results/{tree}/es{es}/fastlmm"
+    conda:
+        "pyseer"
+    shell:
+        "python scripts/runFastLMM.py "
+        "  --trait_file {input.traits} "
+        "  --working_dir {params.working_dir} "
+        "  --kinship {input.phylo} "
+        "  --pair_labels {input.pair_labels} "
+        "  --outfile {output.outfile}"
+
+
+# ──────────────────────────────────────────────
+# ACR Benchmark
+# ──────────────────────────────────────────────
+rule acr_benchmark:
+    input:
+        data        = "test-data/{tree}/es{es}/synthetic_data.csv",
+        tree        = "test-formatting/{tree}/reformated_tree.nwk",
+        pair_labels = "test-formatting/{tree}/es{es}/pair_labels.csv"
+    output:
+        ranking    = "test-results/{tree}/es{es}/acr_benchmark/method_ranking.csv",
+        trajectory = "test-results/{tree}/es{es}/acr_benchmark/stability_trajectory.csv"
+    params:
+        outdir            = "test-results/{tree}/es{es}/acr_benchmark",
+        benchmark_script  = BENCHMARK_SCRIPT,
+        n_stability       = config["benchmark_n_stability"],
+        n_stability_iters = config["benchmark_n_stability_iters"]
+    threads: 16
+    conda:
+        "simphyni_dev"
+    shell:
+        "python {params.benchmark_script} "
+        "  --tree {input.tree} "
+        "  --annotations {input.data} "
+        "  --output {params.outdir} "
+        "  --max_workers {threads} "
+        "  --eval_sim_accuracy "
+        "  --sim_accuracy_n 50 "
+        "  --n_stability {params.n_stability} "
+        "  --n_stability_iters {params.n_stability_iters} "
+        "  --eval_pr "
+        "  --known_pairs {input.pair_labels} "
+        "  --no_legacy "
+
+
+# ──────────────────────────────────────────────
+# Stability Fan
+# ──────────────────────────────────────────────
+rule plot_stability_fan:
+    input:
+        trajectory = "test-results/{tree}/es{es}/acr_benchmark/stability_trajectory.csv"
+    output:
+        done = "test-results/{tree}/es{es}/acr_benchmark/stability_fans/.done"
+    params:
+        outdir     = "test-results/{tree}/es{es}/acr_benchmark/stability_fans",
+        fan_script = STABILITY_FAN_SCRIPT
+    conda:
+        "simphyni_dev"
+    shell:
+        "python {params.fan_script} "
+        "  --trajectory {input.trajectory} "
+        "  --output {params.outdir} "
+        "&& touch {output.done}"

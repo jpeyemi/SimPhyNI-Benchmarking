@@ -13,22 +13,30 @@ Public API
 precompute_tree_structure(tree)
     Walk an ETE3 tree once and return index arrays for O(n) contrast computation.
 
-calibrate_d_nulls(tree_structure, tree_ete3, n_permutations=999)
-    Estimate random_mean and brownian_mean for a given tree topology.
-    These are tree-level constants reused across all trait pairs.
+simulate_bm_vectors(tree_structure, tree_ete3, n_permutations=999)
+    Simulate Brownian motion on the tree once and return raw continuous leaf
+    value matrix of shape (n_permutations, n_leaves).  Reused across all traits.
+
+get_or_calibrate(tree_path, tree_ete3, n_permutations=999)
+    Cached wrapper: runs precompute_tree_structure + simulate_bm_vectors once
+    per unique tree path and returns (tree_structure, bm_leaf_vals).
+
+get_null_distributions(tree_path, tree_structure, bm_leaf_vals, prevalence, n_permutations=999)
+    Return (random_mean, brownian_mean) for a specific trait prevalence.
+    Results are memoized by (tree_path, round(prevalence, 3)) so identical
+    prevalences share one computation.
 
 compute_d_statistic(tree_structure, tip_states, random_mean, brownian_mean)
     Compute D for a single binary tip-state vector in O(n).
-
-get_or_calibrate(tree_path, tree_ete3, n_permutations=999)
-    Cached wrapper: calibrates once per unique tree path and returns
-    (tree_structure, random_mean, brownian_mean).
 """
 
 import numpy as np
 
-# Module-level cache: tree_path → (tree_structure, random_mean, brownian_mean)
-_CACHE = {}
+# tree_path → (tree_structure, bm_leaf_vals)
+_TREE_CACHE = {}
+
+# (tree_path, rounded_prevalence) → (random_mean, brownian_mean)
+_PREVALENCE_CACHE = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -40,6 +48,28 @@ def _get_leaves_of(node):
     if node.is_leaf():
         return [node]
     return node.get_leaves()
+
+
+def _contrast_sums(binary_matrix, node_left_indices, node_right_indices):
+    """
+    Compute per-row sum of absolute clade-mean differences.
+
+    Parameters
+    ----------
+    binary_matrix      : np.ndarray, shape (n_rows, n_leaves)
+    node_left_indices  : list[np.ndarray]
+    node_right_indices : list[np.ndarray]
+
+    Returns
+    -------
+    np.ndarray, shape (n_rows,)
+    """
+    totals = np.zeros(binary_matrix.shape[0])
+    for L, R in zip(node_left_indices, node_right_indices):
+        totals += np.abs(
+            binary_matrix[:, L].mean(axis=1) - binary_matrix[:, R].mean(axis=1)
+        )
+    return totals
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,12 +123,13 @@ def precompute_tree_structure(tree):
     }
 
 
-def calibrate_d_nulls(tree_structure, tree_ete3, n_permutations=999):
+def simulate_bm_vectors(tree_structure, tree_ete3, n_permutations=999):
     """
-    Estimate random_mean and brownian_mean for this tree topology.
+    Simulate Brownian motion on the tree and return raw continuous leaf values.
 
-    Both values are scalars that depend only on the tree, not on any trait
-    vector — compute once and reuse across all pairs on the same tree.
+    This is the expensive per-tree step.  The returned matrix is shared across
+    all traits; each trait thresholds it at its own prevalence in
+    get_null_distributions().
 
     Parameters
     ----------
@@ -108,33 +139,14 @@ def calibrate_d_nulls(tree_structure, tree_ete3, n_permutations=999):
 
     Returns
     -------
-    (random_mean, brownian_mean) : (float, float)
+    bm_leaf_vals : np.ndarray, shape (n_permutations, n_leaves)
+        Raw continuous BM tip values (not thresholded).
     """
-    leaf_names         = tree_structure["leaf_names"]
-    node_left_indices  = tree_structure["node_left_indices"]
-    node_right_indices = tree_structure["node_right_indices"]
-    n_leaves           = len(leaf_names)
+    leaf_names = tree_structure["leaf_names"]
+    n_leaves   = len(leaf_names)
 
     rng = np.random.default_rng(seed=42)
 
-    # ── random_mean: tip-label permutation ───────────────────────────────────
-    # Use a balanced 50/50 binary vector as base; permute it n_permutations times.
-    # D's random_mean is a property of tree topology alone.
-    base = np.zeros(n_leaves)
-    base[: n_leaves // 2] = 1.0
-
-    # Build (n_permutations, n_leaves) matrix row-by-row
-    perms = np.vstack([rng.permutation(base) for _ in range(n_permutations)])
-
-    contrast_sums = np.zeros(n_permutations)
-    for L, R in zip(node_left_indices, node_right_indices):
-        contrast_sums += np.abs(perms[:, L].mean(axis=1) - perms[:, R].mean(axis=1))
-
-    random_mean = float(contrast_sums.mean())
-
-    # ── brownian_mean: BM simulation → binary ────────────────────────────────
-    # Propagate Gaussian increments (variance = branch_length) from root to tips
-    # in preorder, then threshold at row-wise median to get binary states.
     nodes_pre   = list(tree_ete3.traverse("preorder"))
     node_to_idx = {id(n): i for i, n in enumerate(nodes_pre)}
     n_nodes     = len(nodes_pre)
@@ -158,20 +170,60 @@ def calibrate_d_nulls(tree_structure, tree_ete3, n_permutations=999):
         for n in nodes_pre if n.is_leaf()
     }
     leaf_node_cols = [leaf_to_node_idx[name] for name in leaf_names]
-    leaf_vals = bm_vals[:, leaf_node_cols]   # (n_permutations, n_leaves)
+    return bm_vals[:, leaf_node_cols]   # (n_permutations, n_leaves)
 
-    # Threshold at row-wise median → binary
-    medians   = np.median(leaf_vals, axis=1, keepdims=True)
-    bm_binary = (leaf_vals >= medians).astype(float)
 
-    contrast_sums_bm = np.zeros(n_permutations)
-    for L, R in zip(node_left_indices, node_right_indices):
-        contrast_sums_bm += np.abs(
-            bm_binary[:, L].mean(axis=1) - bm_binary[:, R].mean(axis=1)
-        )
+def get_null_distributions(tree_path, tree_structure, bm_leaf_vals, prevalence,
+                           n_permutations=999):
+    """
+    Return (random_mean, brownian_mean) conditioned on a trait's prevalence.
 
-    brownian_mean = float(contrast_sums_bm.mean())
+    Results are memoized by (tree_path, round(prevalence, 3)).
 
+    Parameters
+    ----------
+    tree_path      : str           — cache key (file path string)
+    tree_structure : dict          — output of precompute_tree_structure
+    bm_leaf_vals   : np.ndarray    — shape (n_permutations, n_leaves), from simulate_bm_vectors
+    prevalence     : float         — observed prevalence of the trait (tip_states.mean())
+    n_permutations : int
+
+    Returns
+    -------
+    (random_mean, brownian_mean) : (float, float)
+    """
+    rounded = round(prevalence, 3)
+    key = (tree_path, rounded)
+    if key in _PREVALENCE_CACHE:
+        return _PREVALENCE_CACHE[key]
+
+    node_left_indices  = tree_structure["node_left_indices"]
+    node_right_indices = tree_structure["node_right_indices"]
+    n_leaves           = bm_leaf_vals.shape[1]
+
+    # ── random_mean: permutation null at trait's prevalence ───────────────────
+    n_ones = max(1, round(rounded * n_leaves))
+    base   = np.zeros(n_leaves)
+    base[:n_ones] = 1.0
+
+    # Use a deterministic seed derived from the key so results are reproducible
+    seed = hash(key) & 0xFFFFFFFF
+    rng  = np.random.default_rng(seed=seed)
+    perms = np.vstack([rng.permutation(base) for _ in range(n_permutations)])
+
+    random_mean = float(_contrast_sums(perms, node_left_indices, node_right_indices).mean())
+
+    # ── brownian_mean: threshold BM matrix at trait's prevalence ─────────────
+    # For each BM replicate (row), find the value at the (1 - rounded) quantile
+    # so that approximately `rounded` fraction of leaves are "present".
+    threshold  = np.quantile(bm_leaf_vals, 1.0 - rounded, axis=1, keepdims=True)
+    bm_binary  = (bm_leaf_vals >= threshold).astype(float)
+
+    brownian_mean = float(
+        _contrast_sums(bm_binary, node_left_indices, node_right_indices).mean()
+    )
+
+    _PREVALENCE_CACHE[key] = (random_mean, brownian_mean)
     return random_mean, brownian_mean
 
 
@@ -184,8 +236,8 @@ def compute_d_statistic(tree_structure, tip_states, random_mean, brownian_mean):
     tree_structure   : dict   — output of precompute_tree_structure
     tip_states       : np.ndarray, shape (n_leaves,), dtype float64
                        Values 0.0 / 1.0, ordered by tree_structure["leaf_names"].
-    random_mean      : float  — from calibrate_d_nulls
-    brownian_mean    : float  — from calibrate_d_nulls
+    random_mean      : float  — from get_null_distributions
+    brownian_mean    : float  — from get_null_distributions
 
     Returns
     -------
@@ -213,21 +265,21 @@ def compute_d_statistic(tree_structure, tip_states, random_mean, brownian_mean):
 
 def get_or_calibrate(tree_path, tree_ete3, n_permutations=999):
     """
-    Return cached (tree_structure, random_mean, brownian_mean) for this tree,
-    running calibration on first call.
+    Return cached (tree_structure, bm_leaf_vals) for this tree,
+    running precomputation on first call.
 
     Parameters
     ----------
-    tree_path    : str        — used as cache key (the file path string)
-    tree_ete3    : ete3.Tree
+    tree_path      : str        — used as cache key (the file path string)
+    tree_ete3      : ete3.Tree
     n_permutations : int
 
     Returns
     -------
-    (tree_structure, random_mean, brownian_mean)
+    (tree_structure, bm_leaf_vals)
     """
-    if tree_path not in _CACHE:
-        ts = precompute_tree_structure(tree_ete3)
-        rm, bm = calibrate_d_nulls(ts, tree_ete3, n_permutations)
-        _CACHE[tree_path] = (ts, rm, bm)
-    return _CACHE[tree_path]
+    if tree_path not in _TREE_CACHE:
+        ts           = precompute_tree_structure(tree_ete3)
+        bm_leaf_vals = simulate_bm_vectors(ts, tree_ete3, n_permutations)
+        _TREE_CACHE[tree_path] = (ts, bm_leaf_vals)
+    return _TREE_CACHE[tree_path]

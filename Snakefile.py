@@ -159,7 +159,7 @@ rule generateData:
         import numpy as np
         from ete3 import Tree
         from makeSynthData import synth_mutual_4state_nosim, _load_kde, _compute_bl_stats
-        from d_statistic import get_or_calibrate, compute_d_statistic
+        from d_statistic import get_or_calibrate, get_null_distributions, compute_d_statistic
         import os
 
         t = Tree(input.treefile, format=1)
@@ -175,8 +175,8 @@ rule generateData:
         kde, ecoli_mean_subsize = _load_kde(input.kde)
         bl_stats = _compute_bl_stats(t)
 
-        # Calibrate D-stat nulls once per tree (cached by tree path)
-        tree_structure, random_mean, brownian_mean = get_or_calibrate(
+        # Precompute tree structure and BM vectors once per tree (cached by tree path)
+        tree_structure, bm_leaf_vals = get_or_calibrate(
             input.treefile, t, n_permutations=n_permutations
         )
 
@@ -309,8 +309,10 @@ rule generateData:
             t2   = trait_arrays[col_b_idx].astype(float)
             ord1 = np.array([t1[leaf_order[n]] for n in ts_leaf_names], dtype=float)
             ord2 = np.array([t2[leaf_order[n]] for n in ts_leaf_names], dtype=float)
-            d1   = compute_d_statistic(tree_structure, ord1, random_mean, brownian_mean)
-            d2   = compute_d_statistic(tree_structure, ord2, random_mean, brownian_mean)
+            rm1, bm1 = get_null_distributions(input.treefile, tree_structure, bm_leaf_vals, ord1.mean(), n_permutations)
+            rm2, bm2 = get_null_distributions(input.treefile, tree_structure, bm_leaf_vals, ord2.mean(), n_permutations)
+            d1   = compute_d_statistic(tree_structure, ord1, rm1, bm1)
+            d2   = compute_d_statistic(tree_structure, ord2, rm2, bm2)
             finite = [v for v in (d1, d2) if not np.isnan(v)]
             return d1, d2, (float(max(finite)) if finite else float("nan"))
 
@@ -355,7 +357,7 @@ rule generate_benchmark_data:
         import numpy as np
         from ete3 import Tree
         from makeSynthData import synth_mutual_4state_nosim, _load_kde, _compute_bl_stats
-        from d_statistic import get_or_calibrate, compute_d_statistic
+        from d_statistic import get_or_calibrate, get_null_distributions, compute_d_statistic
         import os
 
         t = Tree(input.treefile, format=1)
@@ -368,8 +370,8 @@ rule generate_benchmark_data:
         d_low          = float(d_cfg.get("d_low_threshold", -0.05))
         d_high         = float(d_cfg.get("d_high_threshold",  0.05))
 
-        # Calibrate D-stat nulls once per tree (cached by tree path)
-        tree_structure, random_mean, brownian_mean = get_or_calibrate(
+        # Precompute tree structure and BM vectors once per tree (cached by tree path)
+        tree_structure, bm_leaf_vals = get_or_calibrate(
             input.treefile, t, n_permutations=n_permutations
         )
 
@@ -449,8 +451,10 @@ rule generate_benchmark_data:
             t2   = trait_arrays[col_b_idx].astype(float)
             ord1 = np.array([t1[leaf_order[n]] for n in ts_leaf_names], dtype=float)
             ord2 = np.array([t2[leaf_order[n]] for n in ts_leaf_names], dtype=float)
-            d1   = compute_d_statistic(tree_structure, ord1, random_mean, brownian_mean)
-            d2   = compute_d_statistic(tree_structure, ord2, random_mean, brownian_mean)
+            rm1, bm1 = get_null_distributions(input.treefile, tree_structure, bm_leaf_vals, ord1.mean(), n_permutations)
+            rm2, bm2 = get_null_distributions(input.treefile, tree_structure, bm_leaf_vals, ord2.mean(), n_permutations)
+            d1   = compute_d_statistic(tree_structure, ord1, rm1, bm1)
+            d2   = compute_d_statistic(tree_structure, ord2, rm2, bm2)
             finite = [v for v in (d1, d2) if not np.isnan(v)]
             return d1, d2, (float(max(finite)) if finite else float("nan"))
 
@@ -489,7 +493,8 @@ rule verify_synthetic_data:
     output:
         stats    = "0-GenerateTrees/{tree}/es{es}/synth_stats.csv",
         prev_png = "0-GenerateTrees/{tree}/es{es}/synth_stats_prev.png",
-        lor_png  = "0-GenerateTrees/{tree}/es{es}/synth_stats_lor.png"
+        lor_png  = "0-GenerateTrees/{tree}/es{es}/synth_stats_lor.png",
+        d_png    = "0-GenerateTrees/{tree}/es{es}/synth_stats_d.png"
     run:
         import numpy as np
         import pandas as pd
@@ -500,64 +505,68 @@ rule verify_synthetic_data:
         data = pd.read_csv(input.datafile, index_col=0)
         pl   = pd.read_csv(input.pair_labels)
 
-        rows = []
-        for _, row in pl.iterrows():
-            t1, t2, direction = row["trait1"], row["trait2"], row["direction"]
-            if t1 not in data.columns or t2 not in data.columns:
-                continue
-            x = data[t1].values.astype(float)
-            y = data[t2].values.astype(float)
-            prev1 = x.mean()
-            prev2 = y.mean()
-            n11 = np.sum((x==1)&(y==1))
-            n10 = np.sum((x==1)&(y==0))
-            n01 = np.sum((x==0)&(y==1))
-            n00 = np.sum((x==0)&(y==0))
-            if n10 > 0 and n01 > 0 and n11 > 0 and n00 > 0:
-                lor = float(np.log((n11*n00)/(n10*n01)))
-            else:
-                lor = float("nan")
-            rows.append({
-                "trait1": t1, "trait2": t2, "direction": direction,
-                "prev_trait1": prev1, "prev_trait2": prev2, "log_odds_ratio": lor
-            })
-
-        stats = pd.DataFrame(rows)
-        stats.to_csv(output.stats, index=False)
-
         dir_labels = {-1: "negative", 0: "null", 1: "positive"}
         colors     = {-1: "#e05c5c", 0: "#aaaaaa", 1: "#5c9ee0"}
 
-        # Prevalence plot
+        def violin_or_scatter(ax, vals, pos, color):
+            if len(vals) >= 2:
+                parts = ax.violinplot([vals], positions=[pos], showmedians=True)
+                for pc in parts["bodies"]:
+                    pc.set_facecolor(color)
+                    pc.set_alpha(0.7)
+            elif len(vals) == 1:
+                ax.scatter([pos], vals, color=color, zorder=3)
+
+        # ── Vectorised stats computation ──────────────────────────────────────
+        valid = pl[pl["trait1"].isin(data.columns) & pl["trait2"].isin(data.columns)].reset_index(drop=True)
+
+        t1_mat = data[valid["trait1"].values].values.astype(float)  # (n_leaves, n_pairs)
+        t2_mat = data[valid["trait2"].values].values.astype(float)
+
+        prev1 = t1_mat.mean(axis=0)
+        prev2 = t2_mat.mean(axis=0)
+
+        # LOR with pseudocount (always finite)
+        n11 = ((t1_mat == 1) & (t2_mat == 1)).sum(axis=0) + 1
+        n10 = ((t1_mat == 1) & (t2_mat == 0)).sum(axis=0) + 1
+        n01 = ((t1_mat == 0) & (t2_mat == 1)).sum(axis=0) + 1
+        n00 = ((t1_mat == 0) & (t2_mat == 0)).sum(axis=0) + 1
+        lor = np.log((n11 * n00) / (n10 * n01))
+
+        stats = valid[["trait1", "trait2", "direction", "d_statistic", "d_stratum"]].copy()
+        stats["prev_trait1"]   = prev1
+        stats["prev_trait2"]   = prev2
+        stats["log_odds_ratio"] = lor
+        stats.to_csv(output.stats, index=False)
+
+        # ── Sanity checks ─────────────────────────────────────────────────────
+        pos_lor = stats[stats["direction"] ==  1]["log_odds_ratio"].dropna()
+        neg_lor = stats[stats["direction"] == -1]["log_odds_ratio"].dropna()
+        assert pos_lor.median() > 0, \
+            f"Positive pairs have non-positive median LOR ({pos_lor.median():.3f}) — simulation may be broken"
+        assert neg_lor.median() < 0, \
+            f"Negative pairs have non-negative median LOR ({neg_lor.median():.3f}) — simulation may be broken"
+
+        # ── Prevalence plot ───────────────────────────────────────────────────
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
         for direction in [-1, 0, 1]:
             sub = stats[stats["direction"] == direction]
             for ax, col in zip(axes, ["prev_trait1", "prev_trait2"]):
-                vals = sub[col].dropna().values
-                if len(vals) >= 2:
-                    ax.violinplot([vals], positions=[direction], showmedians=True)
-                elif len(vals) == 1:
-                    ax.scatter([direction], vals, zorder=3)
-        axes[0].set_xticks([-1, 0, 1])
-        axes[0].set_xticklabels(["negative", "null", "positive"])
-        axes[0].set_ylabel("Prevalence")
-        axes[0].set_title("Trait 1 prevalence by direction")
-        axes[1].set_xticks([-1, 0, 1])
-        axes[1].set_xticklabels(["negative", "null", "positive"])
-        axes[1].set_ylabel("Prevalence")
-        axes[1].set_title("Trait 2 prevalence by direction")
+                violin_or_scatter(ax, sub[col].dropna().values, direction, colors[direction])
+        for ax, title in zip(axes, ["Trait 1 prevalence by direction", "Trait 2 prevalence by direction"]):
+            ax.set_xticks([-1, 0, 1])
+            ax.set_xticklabels(["negative", "null", "positive"])
+            ax.set_ylabel("Prevalence")
+            ax.set_title(title)
         fig.tight_layout()
         fig.savefig(output.prev_png, dpi=150)
         plt.close(fig)
 
-        # LOR plot
+        # ── LOR plot ──────────────────────────────────────────────────────────
         fig, ax = plt.subplots(figsize=(6, 4))
         for direction in [-1, 0, 1]:
-            vals = stats[stats["direction"] == direction]["log_odds_ratio"].dropna().values
-            if len(vals) >= 2:
-                ax.violinplot([vals], positions=[direction], showmedians=True)
-            elif len(vals) == 1:
-                ax.scatter([direction], vals, zorder=3)
+            violin_or_scatter(ax, stats[stats["direction"] == direction]["log_odds_ratio"].dropna().values,
+                              direction, colors[direction])
         ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
         ax.set_xticks([-1, 0, 1])
         ax.set_xticklabels(["negative", "null", "positive"])
@@ -565,6 +574,21 @@ rule verify_synthetic_data:
         ax.set_title("Association signal by direction")
         fig.tight_layout()
         fig.savefig(output.lor_png, dpi=150)
+        plt.close(fig)
+
+        # ── D-statistic plot ──────────────────────────────────────────────────
+        fig, ax = plt.subplots(figsize=(6, 4))
+        for direction in [-1, 0, 1]:
+            violin_or_scatter(ax, stats[stats["direction"] == direction]["d_statistic"].dropna().values,
+                              direction, colors[direction])
+        ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
+        ax.axhline(1, color="black", linewidth=0.8, linestyle=":")
+        ax.set_xticks([-1, 0, 1])
+        ax.set_xticklabels(["negative", "null", "positive"])
+        ax.set_ylabel("D-statistic")
+        ax.set_title("Phylogenetic signal (D) by direction")
+        fig.tight_layout()
+        fig.savefig(output.d_png, dpi=150)
         plt.close(fig)
 
 

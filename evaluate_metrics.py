@@ -11,6 +11,8 @@ def detect_file_type(df):
         return 'scoary'
     if 'pval_by' in df.columns and 'p-value' in df.columns:
         return 'simphyni'
+    if 'p_value' in df.columns and 'direction' in df.columns:
+        return 'coinfinder'
     return None
 
 
@@ -37,6 +39,33 @@ def evaluate_simphyni(df, alpha):
     return results
 
 
+def evaluate_coinfinder(df, alpha):
+    eps = np.finfo(float).eps
+
+    _, fdr_pvals, _, _ = multipletests(df['p_value'].fillna(1).values, method='fdr_by')
+    df = df.copy()
+    df['threshold_p']   = fdr_pvals
+    df['neg_log_pval']  = -np.log10(df['p_value'].fillna(1.0).clip(lower=eps))
+
+    results = {}
+    for target_dir, label_name in [(1, "Direction 1 (Positive)"), (-1, "Direction -1 (Negative)")]:
+        y_true = (df['label'] == target_dir).astype(int)
+
+        is_significant        = df['threshold_p'] < alpha
+        matches_predicted_dir = df['direction'] == target_dir
+        y_pred  = (is_significant & matches_predicted_dir).astype(int)
+        y_score = df['neg_log_pval'] * matches_predicted_dir.astype(int)
+
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall    = recall_score(y_true, y_pred, zero_division=0)
+        prec_curve, rec_curve, _ = precision_recall_curve(y_true, y_score)
+        pr_auc = auc(rec_curve, prec_curve)
+
+        results[label_name] = {'Precision': precision, 'Recall': recall, 'PR_AUC': pr_auc}
+
+    return results
+
+
 def evaluate_scoary(df, alpha, use_fisher):
     eps = np.finfo(float).eps
 
@@ -51,8 +80,9 @@ def evaluate_scoary(df, alpha, use_fisher):
         threshold_label = 'fisher_p (FDR-BY corrected)'
     else:
         score_col     = 'fq*ep'
-        df['threshold_p'] = df['empirical_p']
-        threshold_label = 'empirical_p'
+        _, fdr_pvals, _, _ = multipletests(df['empirical_p'].fillna(1).values, method='fdr_by')
+        df['threshold_p'] = fdr_pvals
+        threshold_label = 'empirical_p (FDR-BY corrected)'
 
     df['neg_log_score'] = -np.log10(df[score_col].fillna(1.0).clip(lower=eps))
 
@@ -114,6 +144,12 @@ def evaluate_predictions(file_path, alpha, use_fisher, pair_labels_path=None):
         results = evaluate_simphyni(df, alpha)
         score_desc     = "-log10(p-value)"
         threshold_desc = f"pval_by < {alpha}"
+    elif file_type == 'coinfinder':
+        if use_fisher:
+            print("Warning: --fisher has no effect on Coinfinder files.")
+        results = evaluate_coinfinder(df, alpha)
+        score_desc     = "-log10(p_value)"
+        threshold_desc = f"p_value (FDR-BY corrected) < {alpha}"
     else:
         results, score_col, threshold_label = evaluate_scoary(df, alpha, use_fisher)
         score_desc     = f"-log10({score_col})"
@@ -137,6 +173,8 @@ def evaluate_predictions(file_path, alpha, use_fisher, pair_labels_path=None):
         print(f"\n--- Corrected Aggregate (low_independence TPs relabeled as non-TP, n={n_relabeled}) ---")
         if file_type == "simphyni":
             c_results = evaluate_simphyni(df_corrected, alpha)
+        elif file_type == "coinfinder":
+            c_results = evaluate_coinfinder(df_corrected, alpha)
         else:
             c_results, _, _ = evaluate_scoary(df_corrected, alpha, use_fisher)
         for dir_name, m in c_results.items():
@@ -155,6 +193,8 @@ def evaluate_predictions(file_path, alpha, use_fisher, pair_labels_path=None):
             print(f"\n[{stratum}]  (n={len(sub)} pairs)")
             if file_type == "simphyni":
                 s_results = evaluate_simphyni(sub, alpha)
+            elif file_type == "coinfinder":
+                s_results = evaluate_coinfinder(sub, alpha)
             else:
                 s_results, _, _ = evaluate_scoary(sub, alpha, use_fisher)
             for dir_name, m in s_results.items():

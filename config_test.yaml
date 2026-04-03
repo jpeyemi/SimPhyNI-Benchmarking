@@ -8,6 +8,9 @@ fixed_trees:
 
 num_msprime_main: 2        # generates msprime_0 only
 
+benchmark_n_stability: 10        # stability replicates (reduced from 32 for test)
+benchmark_n_stability_iters: 5  # simulate→reconstruct cycles per replicate (reduced for test)
+
 d_statistic:
   n_permutations: 999
   d_low_threshold: -0.05    # D_pair ≤ this → low_independence (clade-driven)
