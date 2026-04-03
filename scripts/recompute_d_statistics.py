@@ -107,6 +107,33 @@ def recompute_pair_labels(
 
     t = Tree(str(tree_path), format=1)
 
+    # ── Deduplicate leaf names if needed ──────────────────────────────────────
+    # Both the tree and synth.index must use the same unique names so that
+    # name-based alignment works correctly.  We apply the same counter-based
+    # suffix to each sequence independently; the nth occurrence of name X
+    # becomes X (n=0) or X_n (n≥1) in both structures.
+    def _make_unique(names):
+        seen = {}
+        result = []
+        for name in names:
+            n = seen.get(name, 0)
+            seen[name] = n + 1
+            result.append(name if n == 0 else f"{name}_{n}")
+        return result
+
+    tree_leaf_names_raw = [node.name for node in t.get_leaves()]
+    unique_tree_names   = _make_unique(tree_leaf_names_raw)
+    unique_synth_names  = _make_unique(list(synth.index))
+
+    if unique_tree_names != tree_leaf_names_raw:
+        print(f"  WARN  duplicate leaf names detected — appending suffixes to deduplicate")
+        for node, new_name in zip(t.get_leaves(), unique_tree_names):
+            node.name = new_name
+
+    if unique_synth_names != list(synth.index):
+        synth = synth.copy()
+        synth.index = unique_synth_names
+
     # ── Precompute BM vectors once per tree (cached across calls) ─────────────
     tree_structure, bm_leaf_vals = get_or_calibrate(
         str(tree_path), t, n_permutations=n_permutations
