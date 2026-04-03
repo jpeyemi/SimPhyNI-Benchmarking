@@ -506,14 +506,17 @@ rule verify_synthetic_data:
         pl   = pd.read_csv(input.pair_labels)
 
         dir_labels = {-1: "negative", 0: "null", 1: "positive"}
-        colors     = {-1: "#e05c5c", 0: "#aaaaaa", 1: "#5c9ee0"}
+        colors     = {-1: "#5c9ee0", 0: "#aaaaaa", 1: "#e05c5c"}   # blue=neg, grey=null, red=pos
 
         def violin_or_scatter(ax, vals, pos, color):
             if len(vals) >= 2:
                 parts = ax.violinplot([vals], positions=[pos], showmedians=True)
                 for pc in parts["bodies"]:
                     pc.set_facecolor(color)
-                    pc.set_alpha(0.7)
+                    pc.set_alpha(0.35)
+                for key in ("cbars", "cmins", "cmaxes", "cmedians"):
+                    if key in parts:
+                        parts[key].set_color(color)
             elif len(vals) == 1:
                 ax.scatter([pos], vals, color=color, zorder=3)
 
