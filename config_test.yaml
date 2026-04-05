@@ -6,9 +6,11 @@ msprime_target_leaves: 500
 fixed_trees:
   Escherichia_coli: inputs/species_trees/Escherichia_coli.nwk
 
-num_msprime_main: 2        # generates msprime_0 only
+num_msprime_main: 2        
+num_msprime_benchmark: 1
 
-benchmark_n_stability: 10        # stability replicates (reduced from 32 for test)
+
+benchmark_n_stability: 5        # stability replicates (reduced from 32 for test)
 benchmark_n_stability_iters: 5  # simulate→reconstruct cycles per replicate (reduced for test)
 
 d_statistic:

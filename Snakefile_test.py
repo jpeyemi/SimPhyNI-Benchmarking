@@ -62,15 +62,15 @@ def process_tree(input_tree, output_tree):
 # ──────────────────────────────────────────────
 rule all:
     input:
-        "scripts/kde_model.pkl",
-        expand("test-results/{tree}/es{es}/simphyni_results.csv",              tree=ALL_TREES, es=ES_IDX),
-        expand("test-results/{tree}/es{es}/scoary_results.csv",                tree=ALL_TREES, es=ES_IDX),
-        expand("test-results/{tree}/es{es}/coinfinder_results.csv",            tree=ALL_TREES, es=ES_IDX),
-        expand("test-results/{tree}/es{es}/htreewas_terminal.csv",             tree=ALL_TREES, es=ES_IDX),
-        expand("test-results/{tree}/es{es}/fastlmm_results.csv",               tree=ALL_TREES, es=ES_IDX),
-        # expand("test-results/{tree}/es{es}/acr_benchmark/method_ranking.csv",  tree=ALL_TREES, es=ES_IDX),
-        # expand("test-results/{tree}/es{es}/acr_benchmark/stability_fans/.done",tree=ALL_TREES, es=ES_IDX),
-        expand("test-data/{tree}/es{es}/synth_stats.csv",                      tree=ALL_TREES, es=ES_IDX),
+        # "scripts/kde_model.pkl",
+        # expand("test-results/{tree}/es{es}/simphyni_results.csv",              tree=ALL_TREES, es=ES_IDX),
+        # expand("test-results/{tree}/es{es}/scoary_results.csv",                tree=ALL_TREES, es=ES_IDX),
+        # expand("test-results/{tree}/es{es}/coinfinder_results.csv",            tree=ALL_TREES, es=ES_IDX),
+        # expand("test-results/{tree}/es{es}/htreewas_terminal.csv",             tree=ALL_TREES, es=ES_IDX),
+        # expand("test-results/{tree}/es{es}/fastlmm_results.csv",               tree=ALL_TREES, es=ES_IDX),
+        expand("test-results/{tree}/es{es}/acr_benchmark/method_ranking.csv",  tree=ALL_TREES, es=ES_IDX),
+        expand("test-results/{tree}/es{es}/acr_benchmark/stability_fans/.done",tree=ALL_TREES, es=ES_IDX),
+        # expand("test-data/{tree}/es{es}/synth_stats.csv",                      tree=ALL_TREES, es=ES_IDX),
 
 
 # ──────────────────────────────────────────────

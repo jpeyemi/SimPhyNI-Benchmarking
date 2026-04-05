@@ -93,7 +93,15 @@ def precompute_tree_structure(tree):
         node_left_indices : list[np.ndarray]   — one per internal node
         node_right_indices: list[np.ndarray]   — parallel to node_left_indices
     """
-    leaf_names  = [n.name for n in tree.get_leaves()]
+    leaf_names = [n.name for n in tree.get_leaves()]
+    if len(leaf_names) != len(set(leaf_names)):
+        from collections import Counter
+        dupes = [name for name, cnt in Counter(leaf_names).items() if cnt > 1]
+        raise ValueError(
+            f"Tree has {len(dupes)} non-unique leaf name(s): {dupes[:5]}"
+            f"{'...' if len(dupes) > 5 else ''}. "
+            "Deduplicate leaf names before calling precompute_tree_structure()."
+        )
     leaf_to_idx = {name: i for i, name in enumerate(leaf_names)}
 
     node_left_indices  = []
