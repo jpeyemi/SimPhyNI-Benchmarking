@@ -37,6 +37,19 @@ if (!all(rownames(traits) %in% tree$tip.label))
   stop("Mismatch between trait row names and tree tip labels")
 
 cat("Loaded", ncol(traits), "traits for", length(tree$tip.label), "taxa.\n")
+
+# ─────────────────────────────
+# Pre-filter degenerate traits
+# ─────────────────────────────
+trait_variance <- colSums(traits) > 0 & colSums(traits) < nrow(traits)
+n_before <- nrow(pair_labels)
+pair_labels <- pair_labels[
+  pair_labels$trait1 %in% colnames(traits)[trait_variance] &
+  pair_labels$trait2 %in% colnames(traits)[trait_variance], ]
+n_dropped <- n_before - nrow(pair_labels)
+if (n_dropped > 0)
+  cat("Dropped", n_dropped, "pairs with degenerate (constant) traits.\n")
+
 cat("Running Pagel on", nrow(pair_labels), "labeled pairs.\n")
 
 # ─────────────────────────────
@@ -45,21 +58,18 @@ cat("Running Pagel on", nrow(pair_labels), "labeled pairs.\n")
 num_cores <- min(16, parallel::detectCores(logical = FALSE) - 1)
 cat("Using", num_cores, "cores.\n")
 
-plan(multisession, workers = num_cores)
-options(future.globals.maxSize = 2000 * 1024^2)  # 2 GB
+# Use multicore (fork) on Unix for shared memory — avoids serializing traits/tree
+if (.Platform$OS.type == "unix") {
+  plan(multicore, workers = num_cores)
+} else {
+  plan(multisession, workers = num_cores)
+  options(future.globals.maxSize = 2000 * 1024^2)  # 2 GB (needed for multisession only)
+}
 
 # ─────────────────────────────
-# Helper: analyze one pair
+# Helper: analyze one pair (receives pre-sliced vectors)
 # ─────────────────────────────
-analyze_pair <- function(trait1, trait2, label, traits, tree) {
-  if (!(trait1 %in% colnames(traits)) || !(trait2 %in% colnames(traits))) {
-    return(data.frame(Trait1 = trait1, Trait2 = trait2,
-                      P_Value = NA, Direction = NA, label = label))
-  }
-  x <- traits[, trait1]
-  y <- traits[, trait2]
-  names(x) <- names(y) <- rownames(traits)
-
+analyze_pair <- function(x, y, trait1, trait2, label, tree) {
   res <- tryCatch(
     fitPagel(tree, x, y, method = "fitMk", model = "ARD", dep.var = "xy"),
     error = function(e) NULL
@@ -87,6 +97,9 @@ chunks     <- split(seq_len(n_pairs), ceiling(seq_len(n_pairs) / chunk_size))
 temp_dir <- file.path(output_dir, "pagel_chunks")
 if (!dir.exists(temp_dir)) dir.create(temp_dir, recursive = TRUE)
 
+# Pre-compute row names once — constant across all pairs
+rn <- rownames(traits)
+
 cat("Starting Pagel analysis (resumable)...\n")
 start_time       <- Sys.time()
 completed_chunks <- 0
@@ -106,24 +119,31 @@ for (chunk_id in seq_along(chunks)) {
   idx_range <- chunks[[chunk_id]]
   chunk_df  <- pair_labels[idx_range, ]
 
+  # Pre-slice trait vectors before dispatch — workers receive small named vectors
+  # instead of the full traits matrix, eliminating per-future serialization overhead
+  xs     <- lapply(chunk_df$trait1, function(t) { v <- traits[, t]; names(v) <- rn; v })
+  ys     <- lapply(chunk_df$trait2, function(t) { v <- traits[, t]; names(v) <- rn; v })
+
   chunk_results <- future_mapply(
     analyze_pair,
+    x      = xs,
+    y      = ys,
     trait1 = chunk_df$trait1,
     trait2 = chunk_df$trait2,
     label  = chunk_df$direction,
-    MoreArgs = list(traits = traits, tree = tree),
+    MoreArgs = list(tree = tree),
     SIMPLIFY = FALSE,
-    future.seed = TRUE
+    future.seed = NULL
   )
 
-  chunk_out <- do.call(rbind, chunk_results)
-  write.table(chunk_out, chunk_file, sep = ",", row.names = FALSE, col.names = TRUE)
+  chunk_out <- rbindlist(chunk_results)
+  fwrite(chunk_out, chunk_file)
 
   completed_chunks <- completed_chunks + 1
-  elapsed   <- difftime(Sys.time(), start_time, units = "mins")
+  elapsed    <- difftime(Sys.time(), start_time, units = "mins")
   chunk_time <- difftime(Sys.time(), chunk_start, units = "secs")
-  avg_per   <- as.numeric(elapsed) / completed_chunks
-  eta_mins  <- avg_per * (length(chunks) - completed_chunks)
+  avg_per    <- as.numeric(elapsed) / completed_chunks
+  eta_mins   <- avg_per * (length(chunks) - completed_chunks)
   cat(sprintf("Chunk %d done in %.1fs | %d/%d (%.1f%%) | ETA: %.1f min\n",
               chunk_id, chunk_time, completed_chunks, length(chunks),
               100 * completed_chunks / length(chunks), eta_mins))
