@@ -1,6 +1,7 @@
 import numpy as np
 import sys
 import os
+import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, precision_recall_fscore_support, precision_recall_curve, auc, roc_curve, roc_auc_score
@@ -13,11 +14,22 @@ from scipy import stats
 import statsmodels.stats.multitest as sm
 
 # Initialize paths
-tree_path = sys.argv[-2]
-pastml_path = sys.argv[-4]
-obs_data_path = sys.argv[-3]
-outfile = sys.argv[-1]
+parser = argparse.ArgumentParser(description="Run parameter traversal benchmark.")
+parser.add_argument("--pastml",      required=True, help="Path to ACR output CSV")
+parser.add_argument("--systems",     required=True, help="Path to synthetic traits CSV")
+parser.add_argument("--tree",        required=True, help="Path to reformatted Newick tree")
+parser.add_argument("--pair_labels", required=True, help="Path to pair_labels.csv")
+parser.add_argument("--outfile",     required=True, help="Output CSV path for results")
+args = parser.parse_args()
+
+pastml_path      = args.pastml
+obs_data_path    = args.systems
+tree_path        = args.tree
+pair_labels_path = args.pair_labels
+outfile          = args.outfile
 os.makedirs(os.path.dirname(outfile), exist_ok=True)
+
+pair_labels_df = pd.read_csv(pair_labels_path)
 
 
 simulation_methods = [simulate,simulate_nodist,simulate_ctmp,simulate_norm]
@@ -32,7 +44,7 @@ results_df = pd.DataFrame(columns=['Method', 'Statistic', 'Threshold', 'Bonferro
                                    'Recall_Negative', 'F1_Negative', 'Precision_Positive', 
                                    'Recall_Positive', 'F1_Positive', 'Accuracy', 'AUC_ROC_Negative', 'PR_AUC_Negative', 'AUC_ROC_Positive', 'PR_AUC_Positive', 'FDR_Negative', 'FPR_Negative', 'FDR_Positive', 'FPR_Positive'])
 
-def evaluate(name, Sim):
+def evaluate(name, Sim, labels):
     neg_auc, neg_pr = None, None
     pos_auc, pos_pr = None, None
     for condition in significance_conditions:
@@ -43,10 +55,9 @@ def evaluate(name, Sim):
             significance_threshold = condition
             correction = False
         # Get top results with current settings
-        res = Sim.get_top_results(correction, top=int(len(Sim.obsdf.columns)), alpha = significance_threshold).sort_index()
+        res = Sim.get_top_results(correction, top=len(Sim.pairs), alpha = significance_threshold).sort_index()
         predicted_directions = res['direction']
         pvalues = res['p-value']
-        labels = [0]*3000 + [-1]*300 + [1]*300 
         res['labels'] = labels
         if not neg_auc:
             neg_auc, neg_pr = AUCs(res['labels'],pvalues,predicted_directions,-1,str(name) + '_neg')
@@ -206,25 +217,37 @@ for sim in Sims:
         Sim.initialize_simulation_parameters(pair_statistic= Sims[sim][1],collapse_theshold=0.00, single_trait=True,prevalence_threshold=0.00, kde = Sims[sim][1] in [pair_statistics[j] for j in kde_indexes])
         Sim.set_trials(64)
 
-        refs = list(range(0,int(len(Sim.obsdf.columns)),2))
-        pairs = []
-        for i in refs:
-            pairs.extend([(i,i+j) for j in range(1,2)])
-        Sim.pairs, Sim.obspairs = Sim._get_pair_data2(Sim.obsdf_modified,pairs)
+        # mappingr: gene_name -> internal index string (column keys of obsdf_modified)
+        name_to_idx = Sim.mappingr
+        filtered = [
+            (str(row["trait1"]), str(row["trait2"]), int(row["direction"]))
+            for _, row in pair_labels_df.iterrows()
+            if str(row["trait1"]) in name_to_idx and str(row["trait2"]) in name_to_idx
+        ]
+        pairs  = [(name_to_idx[t1], name_to_idx[t2]) for t1, t2, _ in filtered]
+        labels = [d for _, _, d in filtered]
+        Sim.pairs, Sim.obspairs = Sim._get_pair_data2(Sim.obsdf_modified, pairs)
+        Sim.total_tests = len(Sim.pairs)
 
-        if Sims[sim][0] == simulation_methods[0] and Sims[sim][1] == pair_statistics[0]:
+        if Sims[sim][0] == simulation_methods[0]:      # simulate = simulate_glrates_bit
             bit = True
+            norm = False
             sim_func = None
-        else: 
+        elif Sims[sim][0] == simulation_methods[3]:    # simulate_norm = simulate_glrates_bit_norm
+            bit = True
+            norm = True
+            sim_func = None
+        else:
             bit = False
+            norm = False
             sim_func = Sims[sim][0]
 
-        Sim.run_simulation(parallel=True, simulation_function= sim_func, bit = bit, norm = False)
-        Sims[sim] = Sim # type: ignore
+        Sim.run_simulation(parallel=True, simulation_function=sim_func, bit=bit, norm=norm)
+        Sims[sim] = (Sim, labels) # type: ignore
 
 # Evaluate simulations
 for i in Sims:
-    evaluate(i, Sims[i])
+    evaluate(i, Sims[i][0], Sims[i][1])
 
 
 # Save the results to a CSV file

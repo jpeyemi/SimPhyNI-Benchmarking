@@ -27,5 +27,5 @@ d_statistic:
 
 # ACR benchmarking settings
 benchmark_max_workers: 64
-benchmark_n_stability: 10
-benchmark_n_stability_iters: 5   # simulate→reconstruct cycles for stability_trajectory.csv
+benchmark_n_stability: 16
+benchmark_n_stability_iters: 8   # simulate→reconstruct cycles for stability_trajectory.csv

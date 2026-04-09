@@ -57,44 +57,6 @@ binary_mask    <- apply(gene_data, 2, function(col) length(unique(col[!is.na(col
 binary_indices <- which(binary_mask)
 message(paste0("Binary traits: ", length(binary_indices), " / ", num_traits))
 
-# ---------------------------------------------------------------------------
-# PRECOMPUTE tree-dependent quantities once (shared across all phenotype runs)
-# ---------------------------------------------------------------------------
-# These objects depend only on gene_data + tree, which never change across
-# the 600 per-phenotype treeWAS() calls.  Passing them in avoids recomputing
-# ancestral state reconstruction and null-distribution simulation each time.
-
-# Resolve whether treeWAS exports asr / get.fitch.n.mts / snp.sim, falling
-# back to the namespace if they are internal.
-.asr <- if (existsFunction("asr")) asr else treeWAS:::asr
-.fitch <- if (existsFunction("get.fitch.n.mts")) get.fitch.n.mts else treeWAS:::get.fitch.n.mts
-.snp_sim <- if (existsFunction("snp.sim")) snp.sim else treeWAS:::snp.sim
-
-message("Precomputing SNP ancestral state reconstruction (shared across all phenotypes)...")
-snps_recon <- tryCatch(
-  .asr(snps = gene_data, tree = tree, type = "parsimony", method = "discrete"),
-  error = function(e) { message("asr() failed, will let treeWAS compute per call: ", e$message); NULL }
-)
-
-message("Precomputing Fitch parsimony scores...")
-n_subs <- tryCatch(
-  .fitch(snps = gene_data, tree = tree),
-  error = function(e) { message("get.fitch.n.mts() failed, will let treeWAS compute per call: ", e$message); NULL }
-)
-
-snps_sim_recon <- NULL
-if (!is.null(n_subs)) {
-  message("Simulating null SNP set and reconstructing ancestral states...")
-  n_snps_sim <- max(10L * ncol(gene_data), 10000L)
-  snps_sim_recon <- tryCatch({
-    sim_snps <- .snp_sim(tree = tree, n.snps.sim = n_snps_sim, n.subs = n_subs)
-    .asr(snps = sim_snps, tree = tree, type = "parsimony", method = "discrete")
-  }, error = function(e) {
-    message("Null simulation precompute failed, will let treeWAS compute per call: ", e$message)
-    NULL
-  })
-}
-
 # Adaptive core count: honour SLURM allocation, fall back to 4
 n_cores <- min(
   as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", unset = "4")),
@@ -142,9 +104,6 @@ process_phenotype <- function(pheno_idx) {
       gene_data,
       phen,
       tree                    = tree,
-      snps.reconstruction     = snps_recon,      # precomputed; NULL = treeWAS recomputes
-      snps.sim.reconstruction = snps_sim_recon,  # precomputed; NULL = treeWAS recomputes
-      n.subs                  = n_subs,          # precomputed; NULL = treeWAS recomputes
       plot.tree               = FALSE,
       plot.manhattan          = FALSE,
       plot.null.dist          = FALSE,
@@ -174,7 +133,16 @@ combined_terminal     <- bind_rows(lapply(result_list, function(x) if (!is.null(
 combined_simultaneous <- bind_rows(lapply(result_list, function(x) if (!is.null(x)) x$simultaneous))
 combined_subsequent   <- bind_rows(lapply(result_list, function(x) if (!is.null(x)) x$subsequent))
 
-# Write output files
-write.csv(combined_terminal,     terminal_output,     row.names = FALSE)
-write.csv(combined_simultaneous, simultaneous_output, row.names = FALSE)
-write.csv(combined_subsequent,   subsequent_output,   row.names = FALSE)
+# Write output files, deleting any that have no rows
+write_or_delete <- function(df, path) {
+  if (!is.null(df) && nrow(df) > 0) {
+    write.csv(df, path, row.names = FALSE)
+  } else {
+    if (file.exists(path)) file.remove(path)
+    message(paste0("No results for ", path, " — file removed/skipped."))
+  }
+}
+
+write_or_delete(combined_terminal,     terminal_output)
+write_or_delete(combined_simultaneous, simultaneous_output)
+write_or_delete(combined_subsequent,   subsequent_output)

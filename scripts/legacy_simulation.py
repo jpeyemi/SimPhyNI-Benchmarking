@@ -422,7 +422,7 @@ def simulate_glrates_bit(self):
     for node in self.tree.traverse():  # type: ignore
         if node.up is None:
             root = self.root_states > 0
-            sim[node_map[node], root] = 2 ^ self.NUM_TRIALS - 1
+            sim[node_map[node], root] = (1 << self.NUM_TRIALS) - 1
             continue
 
         parent = sim[node_map[node.up], :]

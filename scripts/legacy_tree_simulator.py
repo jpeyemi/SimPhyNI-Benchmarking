@@ -55,6 +55,10 @@ class TreeSimulator:
             self.pastml = self.pastmlfile.copy()
         else:
             self.pastml = pd.read_csv(self.pastmlfile, index_col=0)
+            # New pastml format: gene is the first column, so it becomes the index.
+            # Reset it to a regular column to preserve legacy behavior.
+            if self.pastml.index.name == 'gene':
+                self.pastml = self.pastml.reset_index()
 
         if isinstance(self.obsdatafile, pd.DataFrame):
             self.obsdf = self.obsdatafile.copy()
