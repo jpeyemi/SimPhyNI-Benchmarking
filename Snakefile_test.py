@@ -390,7 +390,7 @@ rule ancestral_reconstruction:
         "  --tree_file {input.tree} "
         "  --output_csv {output.outfile} "
         "  --max_workers {threads} "
-        "  --uncertainty both "
+        "  --reconstruction all "
 
 
 # ──────────────────────────────────────────────
