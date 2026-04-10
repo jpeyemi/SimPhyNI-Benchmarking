@@ -7,31 +7,33 @@ Inputs:
   --tree  : Newick tree used for ACR (Escherichia_coli.nwk)
   --out   : Output pickle path (default: scripts/kde_model.pkl)
 
+The output pickle is a dict:
+  {
+    "kde"            : scipy.stats.gaussian_kde object  (legacy; no longer used
+                       for rate sampling by default),
+    "ecoli_total_bl" : float  (IQR-filtered total branch length of ref tree),
+    "n_ecoli_taxa"   : int    (number of leaves in the reference tree),
+  }
+
+NOTE — primary rate method (as of rate-variant exploration):
+  makeSynthData.synth_mutual_4state_nosim now samples rates directly from
+  pastmlout_marginal.csv using:
+    gain_rate = gains / gain_subsize
+    loss_rate = losses / loss_subsize
+  and scales via π/λ decomposition (ecoli_total_bl / target_total_bl applied
+  to λ only).  This file is still required to produce the ecoli_total_bl and
+  n_ecoli_taxa metadata stored in the pickle.  The KDE object itself is only
+  used when kde= is explicitly passed to synth_mutual_4state_nosim (legacy).
+
 The KDE is fitted on:
   [log10(gain_rate), log10(loss_rate), root_prob]
 
 where:
-  gain_rate = gains_flow / gain_subsize_marginal_thresh
-  loss_rate = losses_flow / loss_subsize_marginal_thresh
+  gain_rate = gains_flow / ecoli_total_bl
+  loss_rate = losses_flow / ecoli_total_bl
 
-gain_subsize_marginal_thresh is the sum of subtree branch lengths below
-each gain event, with IQR-outlier branches scaled down. Dividing
-gains_flow by this gives the gain rate per unit of IQR-filtered subtree
-evolutionary space.
-
-The output pickle is a dict:
-  {
-    "kde"              : scipy.stats.gaussian_kde object,
-    "ecoli_total_bl"   : float  (IQR-filtered total branch length of ref tree),
-    "ecoli_mean_subsize": float (mean gain_subsize_marginal_thresh across genes),
-  }
-
-Rate scaling for new trees (in makeSynthData.py):
-  gain_rates = kde_sample_gains * ecoli_mean_subsize / new_tree_total_bl
-
-This preserves the expected total transition count:
-  kde_sample_gains * ecoli_mean_subsize  ≈  expected gains on E. coli tree
-  / new_tree_total_bl                    →  rate per new-tree branch-length unit
+ecoli_total_bl is the IQR-filtered total branch length of the reference tree
+(branches above Q3 + 0.5*IQR in log10 space are capped before summing).
 """
 
 import argparse
@@ -69,39 +71,32 @@ def main():
     parser.add_argument("--out",  default="scripts/kde_model.pkl", help="Output pickle path")
     args = parser.parse_args()
 
-    # ── Reference tree branch length ──────────────────────────────────────────
+    # ── Reference tree branch length and leaf count ───────────────────────────
     print(f"Loading reference tree: {args.tree}")
     ecoli_total_bl, _ = compute_ecoli_total_bl(args.tree)
     print(f"  IQR-filtered total branch length: {ecoli_total_bl:.6f}")
+
+    t = Tree(args.tree, format=1)
+    n_ecoli_taxa = len(t.get_leaves())
+    print(f"  n_ecoli_taxa (leaves): {n_ecoli_taxa}")
 
     # ── Load ACR output ───────────────────────────────────────────────────────
     print(f"Loading ACR output: {args.acr}")
     df = pd.read_csv(args.acr)
 
-    required = {"gains_flow", "losses_flow",
-                "gain_subsize_marginal_thresh", "loss_subsize_marginal_thresh",
-                "root_prob"}
+    required = {"gains_flow", "losses_flow", "root_prob"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns in ACR CSV: {missing}")
 
     # ── Compute rates ─────────────────────────────────────────────────────────
-    df["gain_rate"] = df["gains_flow"] / df["gain_subsize_marginal_thresh"]
-    df["loss_rate"] = df["losses_flow"] / df["loss_subsize_marginal_thresh"]
+    df["gain_rate"] = df["gains_flow"] / ecoli_total_bl
+    df["loss_rate"] = df["losses_flow"] / ecoli_total_bl
 
-    # Filter: require positive rates and positive subsize (avoids log(0))
-    mask = (
-        (df["gain_rate"] > 0) &
-        (df["loss_rate"] > 0) &
-        (df["gain_subsize_marginal_thresh"] > 0) &
-        (df["loss_subsize_marginal_thresh"] > 0)
-    )
+    # Filter: require positive rates (avoids log(0))
+    mask = (df["gain_rate"] > 0) & (df["loss_rate"] > 0)
     df_filt = df[mask].copy()
     print(f"  Genes after filtering (rate > 0): {len(df_filt)} / {len(df)}")
-
-    # ── Reference subsize (used for scaling on new trees) ────────────────────
-    ecoli_mean_subsize = float((df_filt["gain_subsize_marginal_thresh"].mean() + df_filt["loss_subsize_marginal_thresh"].mean())/2)
-    print(f"  Mean gain_subsize_marginal_thresh (scaling ref): {ecoli_mean_subsize:.6f}")
 
     # ── Fit KDE ───────────────────────────────────────────────────────────────
     log_gain = np.log10(df_filt["gain_rate"].values)
@@ -122,9 +117,9 @@ def main():
 
     # ── Save ──────────────────────────────────────────────────────────────────
     payload = {
-        "kde":               kde,
-        "ecoli_total_bl":    ecoli_total_bl,
-        "ecoli_mean_subsize": ecoli_mean_subsize,
+        "kde":            kde,
+        "ecoli_total_bl": ecoli_total_bl,
+        "n_ecoli_taxa":   int(n_ecoli_taxa),
     }
     with open(args.out, "wb") as f:
         pickle.dump(payload, f)

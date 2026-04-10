@@ -5,25 +5,45 @@ import pickle
 from scipy.stats import gaussian_kde
 from scipy.special import expit
 
-# Module-level KDE cache: avoids reloading from disk on every call
+# Module-level caches
 _KDE_CACHE = {}
+_ACR_CACHE = {}
+
+
+def _load_acr(path='pastmlout_marginal.csv'):
+    """Load ACR CSV and compute direct gain/loss rates.
+
+    gain_rate = gains / gain_subsize
+    loss_rate = losses / loss_subsize
+
+    Rows where either subsize is zero or either rate is non-positive are
+    excluded.  Cached after first load.
+    """
+    if path not in _ACR_CACHE:
+        df = pd.read_csv(path)
+        df = df[(df['gain_subsize'] > 0) & (df['loss_subsize'] > 0)].copy()
+        df['g'] = df['gains'] / df['gain_subsize']
+        df['l'] = df['losses'] / df['loss_subsize']
+        df = df[(df['g'] > 0) & (df['l'] > 0)].reset_index(drop=True)
+        _ACR_CACHE[path] = df
+    return _ACR_CACHE[path]
 
 
 def _load_kde(path='scripts/kde_model.pkl'):
     """Load KDE model from disk, caching after first load.
 
-    Returns (kde, ecoli_mean_subsize).
+    Returns (kde, ecoli_total_bl, n_ecoli_taxa).
     Supports both the new dict format (from build_kde.py) and the legacy
-    raw-KDE format (ecoli_mean_subsize will be None for legacy files).
+    raw-KDE format (ecoli_total_bl and n_ecoli_taxa will be None for legacy files).
     """
     if path not in _KDE_CACHE:
         with open(path, 'rb') as f:
             obj = pickle.load(f)
         if isinstance(obj, dict):
-            _KDE_CACHE[path] = (obj['kde'], obj['ecoli_mean_subsize'])
+            _KDE_CACHE[path] = (obj['kde'], obj['ecoli_total_bl'], obj.get('n_ecoli_taxa'))
         else:
             # Legacy format: raw KDE object, no scaling metadata
-            _KDE_CACHE[path] = (obj, None)
+            _KDE_CACHE[path] = (obj, None, None)
     return _KDE_CACHE[path]
 
 
@@ -42,77 +62,90 @@ def _compute_bl_stats(t):
     return upper_bound, bl_mean
 
 
-def synth_mutual_4state_nosim(dir, t, mod, kde=None, bl_stats=None, ecoli_mean_subsize=None, gamma_alpha=None):
+def synth_mutual_4state_nosim(dir, t, mod,
+                              kde=None, bl_stats=None,
+                              n_ecoli_taxa=None,
+                              gamma_alpha=None):
     """
     Simulate a pair of binary traits under a 4-state CTMC model (no simultaneous transitions).
 
     Parameters
     ----------
-    dir               : -1, 0, or 1 — direction of association
-    t                 : ete3 Tree
-    mod               : effect size modifier (log10 scale)
-    kde               : pre-loaded KDE object (optional; loaded from disk if None)
-    bl_stats          : (upper_bound, bl_mean) tuple from _compute_bl_stats (optional)
-    ecoli_mean_subsize: float — mean(gain_subsize_marginal_thresh) from build_kde.py;
-                        used to convert KDE-sampled rates to new-tree rates.
-                        Loaded from KDE pkl if None.
+    dir          : -1, 0, or 1 — direction of association
+    t            : ete3 Tree
+    mod          : effect size modifier (log10 scale)
+    kde          : pre-loaded KDE object (optional; loaded from disk if None)
+    bl_stats     : (upper_bound, bl_mean) tuple from _compute_bl_stats (optional)
+    n_ecoli_taxa : int — number of leaves in the E. coli reference tree;
+                   loaded from KDE pkl if None.
+    gamma_alpha  : float — if set, branch lengths are gamma-scaled
     """
     num_nodes = len(t.get_descendants()) + 1
     node_map = {node: idx for idx, node in enumerate([t] + t.get_descendants())}
     leaves = []
 
-    if kde is None:
-        kde, ecoli_mean_subsize = _load_kde()
-
-    samples = kde.resample(2)
-    gains = 10**samples[0]
-    losses = 10**samples[1]
-    root_state_bits = np.rint(samples[2]).astype(int)
-    root_state = int(f'{root_state_bits[1]:0b}{root_state_bits[0]:0b}', 2)
+    # Always load tree metadata from KDE pkl (cached; KDE object itself unused here)
+    _, ecoli_total_bl, _loaded_n_ecoli = _load_kde()
+    if n_ecoli_taxa is None:
+        n_ecoli_taxa = _loaded_n_ecoli
 
     if bl_stats is None:
         bl_stats = _compute_bl_stats(t)
-    upper_bound, _ = bl_stats
+    upper_bound, bl_mean = bl_stats
 
-    # IQR-filtered total branch length of the new tree (cap outlier branches)
+    # IQR-filtered total branch length of the target tree
     total_bl = sum(
         min(n.dist, upper_bound)
         for n in t.traverse()
         if not n.is_root() and n.dist > 0
     )
 
-    # Rate scaling: preserve expected transition count from E. coli calibration.
-    # KDE samples gains = gains_flow / gain_subsize_marginal_thresh
-    #   (rate per E. coli subtree-BL unit).
-    # Expected gains on E. coli ≈ gains * ecoli_mean_subsize.
-    # For new tree: gain_rate = gains * ecoli_mean_subsize / new_total_bl.
-    # if ecoli_mean_subsize is not None and total_bl > 0:
-    #     gain_rates = gains * ecoli_mean_subsize / (total_bl / 2) # approximation that half the tree is present and other half is absent 
-    #     loss_rates = losses * ecoli_mean_subsize / (total_bl / 2)
-    # else:
-    #     # Fallback for legacy KDE without scaling metadata
-    _, bl_mean = bl_stats
-    gain_rates = gains * 0.00603 / bl_mean
-    loss_rates = losses * 0.00603 / bl_mean
+    if kde is not None:
+        # ── Legacy KDE path ────────────────────────────────────────────────────
+        # Sample rates from the joint KDE trained on gains_flow / ecoli_total_bl.
+        # Scales by total_bl_ntaxa correction (original behaviour).
+        samples = kde.resample(2)
+        gains_raw = 10 ** samples[0]
+        losses_raw = 10 ** samples[1]
+        root_state_bits = np.rint(samples[2]).astype(int)
+        root_state = int(f'{root_state_bits[1]:0b}{root_state_bits[0]:0b}', 2)
 
-    # Prevalence-preserving rate compensation.
-    # Scale base rates so the effective marginal rates (averaged over the
-    # partner trait's null prevalence) equal the KDE-sampled rates.
-    # For dir=0: M_g = M_l = 1  =>  denominators = 1  =>  no change.
-    M_g = 10 ** (mod * dir)
-    M_l = 10 ** (-mod * dir)
+        n_target_taxa = len(t.get_leaves())
+        if n_ecoli_taxa is None:
+            n_ecoli_taxa = n_target_taxa
+        if ecoli_total_bl is not None and ecoli_total_bl > 0 and total_bl > 0:
+            gain_rates = gains_raw * (ecoli_total_bl / total_bl) * (n_target_taxa / n_ecoli_taxa)
+            loss_rates = losses_raw * (ecoli_total_bl / total_bl) * (n_target_taxa / n_ecoli_taxa)
+        else:
+            gain_rates = gains_raw * 0.00603 / bl_mean
+            loss_rates = losses_raw * 0.00603 / bl_mean
 
-    p1 = gain_rates[0] / (gain_rates[0] + loss_rates[0])
-    p2 = gain_rates[1] / (gain_rates[1] + loss_rates[1])
+    else:
+        # ── Direct ACR path (default) ──────────────────────────────────────────
+        # Rates: gains / gain_subsize  and  losses / loss_subsize.
+        # Scaling: π/λ decomposition — π = g/(g+l) is preserved; λ = g+l is
+        # scaled by ecoli_total_bl / target_total_bl.  This was the best
+        # cross-tree scaling method in the rate-variant exploration.
+        df_acr = _load_acr()
+        rows = df_acr.sample(n=2, replace=True)
+        gains_raw = rows['g'].values.astype(float)
+        losses_raw = rows['l'].values.astype(float)
 
-    gain_rates = np.array([
-        gain_rates[0] / (1.0 + (M_g - 1.0) * p2),
-        gain_rates[1] / (1.0 + (M_g - 1.0) * p1),
-    ])
-    loss_rates = np.array([
-        loss_rates[0] / (1.0 + (M_l - 1.0) * p2),
-        loss_rates[1] / (1.0 + (M_l - 1.0) * p1),
-    ])
+        lam_raw = gains_raw + losses_raw + 1e-30
+        pi = gains_raw / lam_raw
+        f = (ecoli_total_bl / total_bl) if (ecoli_total_bl is not None and total_bl > 0) else 1.0
+        lam_scaled = lam_raw * f
+        gain_rates = pi * lam_scaled
+        loss_rates = (1.0 - pi) * lam_scaled
+
+        # Root state from stationary distribution of the two traits' π values
+        p0 = (1.0 - pi[0]) * (1.0 - pi[1])
+        p1 = pi[0]          * (1.0 - pi[1])
+        p2 = (1.0 - pi[0]) * pi[1]
+        p3 = pi[0]          * pi[1]
+        probs = np.array([p0, p1, p2, p3])
+        probs /= probs.sum()
+        root_state = int(np.random.choice(4, p=probs))
 
     gain_modifier = [10 ** (-mod), 1, 10 ** (mod)]
     loss_modifier = [10 ** (mod), 1, 10 ** (-mod)]
@@ -171,27 +204,26 @@ def synth_mutual_4state_nosim(dir, t, mod, kde=None, bl_stats=None, ecoli_mean_s
                          trait2[[node_map[l] for l in leaves]]], axis=1)
     prev = lineages.mean(axis=0)
 
-    return lineages, prev, gains.tolist(), losses.tolist(), np.zeros(2), leaves
+    return lineages, prev, gain_rates.tolist(), loss_rates.tolist(), np.zeros(2), leaves
 
-def synth_directional(dir, t, mod, kde=None, bl_stats=None, ecoli_mean_subsize=None):
+def synth_directional(dir, t, mod, kde=None, bl_stats=None):
     """
     Simulate a directional (asymmetric) pair of traits under a 4-state CTMC model.
 
     Parameters
     ----------
-    dir               : -1, 0, or 1 — direction of association
-    t                 : ete3 Tree
-    mod               : effect size modifier (log10 scale)
-    kde               : pre-loaded KDE object (optional; loaded from disk if None)
-    bl_stats          : (upper_bound, bl_mean) tuple from _compute_bl_stats (optional)
-    ecoli_mean_subsize: float — scaling reference from build_kde.py (optional)
+    dir      : -1, 0, or 1 — direction of association
+    t        : ete3 Tree
+    mod      : effect size modifier (log10 scale)
+    kde      : pre-loaded KDE object (optional; loaded from disk if None)
+    bl_stats : (upper_bound, bl_mean) tuple from _compute_bl_stats (optional)
     """
     num_nodes = len(t.get_descendants()) + 1
     node_map = {node: idx for idx, node in enumerate([t] + t.get_descendants())}
     leaves = []
 
     if kde is None:
-        kde, ecoli_mean_subsize = _load_kde()
+        kde, _ecoli_total_bl, _n_ecoli = _load_kde()
 
     samples = kde.resample(2)
     gains = 10**samples[0]
@@ -209,13 +241,9 @@ def synth_directional(dir, t, mod, kde=None, bl_stats=None, ecoli_mean_subsize=N
         if not n.is_root() and n.dist > 0
     )
 
-    if ecoli_mean_subsize is not None and total_bl > 0:
-        gain_rates = gains * ecoli_mean_subsize / total_bl
-        loss_rates = losses * ecoli_mean_subsize / total_bl
-    else:
-        _, bl_mean = bl_stats
-        gain_rates = gains * 0.00603 / bl_mean
-        loss_rates = losses * 0.00603 / bl_mean
+    _, bl_mean = bl_stats
+    gain_rates = gains * 0.00603 / bl_mean
+    loss_rates = losses * 0.00603 / bl_mean
 
     gain_modifier = [10 ** (-mod), 1, 10 ** (mod)]
     loss_modifier = [10 ** (mod), 1, 10 ** (-mod)]
