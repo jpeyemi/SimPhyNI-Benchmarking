@@ -1,5 +1,5 @@
 num_pairs: 300
-effect_sizes: [3, 2, 1, 0.75, 0.5, 0.25]
+effect_sizes: [0, 0.15, 0.5, 0.70, 1.0, 2.0] #[3, 2, 1, 0.75, 0.5, 0.25]
 msprime_target_leaves: 500
 gamma_alpha:           # Gamma rate heterogeneity shape param (null=None to disable)
 
@@ -22,8 +22,8 @@ num_msprime_benchmark: 3   # generates bench_0, bench_1, bench_2 (ACR benchmarki
 
 d_statistic:
   n_permutations: 999       # permutations for random_mean and brownian_mean calibration
-  d_low_threshold: -0.05    # D_pair ≤ this → low_independence (clade-driven)
-  d_high_threshold: 0.05    # D_pair > this → high_independence
+  d_low_threshold: -0.1    # D_pair ≤ this → low_independence (clade-driven)
+  d_high_threshold: 0.1    # D_pair > this → high_independence
 
 # ACR benchmarking settings
 benchmark_max_workers: 64

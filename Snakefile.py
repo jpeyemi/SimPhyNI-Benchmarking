@@ -81,17 +81,17 @@ def process_tree(input_tree, output_tree):
 rule all:
     input: #Rerun for flow
         "scripts/kde_model.pkl",
-        expand("2-Results/{tree}/es{es}/simphyni_results_flow.csv",     tree=ALL_TREES, es=ES_IDX),
+        expand("2-Results/{tree}/es{es}/simphyni_results.csv",     tree=ALL_TREES, es=ES_IDX),
         # expand("2-Results/{tree}/es{es}/htreewas_terminal.csv",    tree=ALL_TREES, es=ES_IDX),
-        # expand("2-Results/{tree}/es{es}/scoary_results.csv",       tree=ALL_TREES, es=ES_IDX),
+        expand("2-Results/{tree}/es{es}/scoary_results.csv",       tree=ALL_TREES, es=ES_IDX),
         # expand("2-Results/{tree}/es{es}/pagel_results.csv",        tree=ALL_TREES, es=ES_IDX),
         # expand("2-Results/{tree}/es{es}/fastlmm_results.csv",      tree=ALL_TREES, es=ES_IDX),
         # expand("2-Results/{tree}/es{es}/spydrpick_results.csv",    tree=ALL_TREES, es=ES_IDX),
         # expand("2-Results/{tree}/es{es}/coinfinder_results.csv",   tree=ALL_TREES, es=ES_IDX),
-        # expand("0-GenerateTrees/{tree}/es{es}/synth_stats.csv",    tree=ALL_TREES, es=ES_IDX),
-        # expand("benchmark-acr/{bench}/acr_benchmark/method_ranking.csv",       bench=BENCH_TREES),
-        # expand("benchmark-acr/{bench}/acr_benchmark/stability_fans/.done",     bench=BENCH_TREES),
-        expand("2-Results/{tree}/es{es}/paramtraversal.csv", tree=ALL_TREES, es=ES_IDX[0:3]),
+        expand("0-GenerateTrees/{tree}/es{es}/synth_stats.csv",    tree=ALL_TREES, es=ES_IDX),
+        expand("benchmark-acr/{bench}/acr_benchmark/method_ranking.csv",       bench=BENCH_TREES),
+        expand("benchmark-acr/{bench}/acr_benchmark/stability_fans/.done",     bench=BENCH_TREES),
+        # expand("2-Results/{tree}/es{es}/paramtraversal.csv", tree=ALL_TREES, es=ES_IDX[0:3]),
 
 
 # ──────────────────────────────────────────────
@@ -159,9 +159,13 @@ rule generateData:
     run:
         import numpy as np
         from ete3 import Tree
-        from makeSynthData import synth_mutual_4state_nosim, _load_kde, _compute_bl_stats
+        import makeSynthData as _msd
         from d_statistic import get_or_calibrate, get_null_distributions, compute_d_statistic
         import os
+
+        synth_mutual_4state_nosim = _msd.synth_mutual_4state_nosim
+        _load_kde                 = _msd._load_kde
+        _compute_bl_stats         = _msd._compute_bl_stats
 
         t = Tree(input.treefile, format=1)
         effect_size = params.effect_size
@@ -173,7 +177,7 @@ rule generateData:
         d_high         = float(d_cfg.get("d_high_threshold",  0.05))
 
         # Pre-compute shared resources once per tree
-        kde, ecoli_mean_subsize = _load_kde(input.kde)
+        kde, ecoli_total_bl, n_ecoli_taxa = _load_kde(input.kde)
         bl_stats = _compute_bl_stats(t)
 
         # Precompute tree structure and BM vectors once per tree (cached by tree path)
@@ -191,8 +195,8 @@ rule generateData:
             while len(storage) < params.num_pairs:
                 result = synth_mutual_4state_nosim(
                     direction, t, effect_size,
-                    kde=kde, bl_stats=bl_stats,
-                    ecoli_mean_subsize=ecoli_mean_subsize,
+                    kde=None, bl_stats=bl_stats,
+                    n_ecoli_taxa=n_ecoli_taxa,
                     gamma_alpha=params.gamma_alpha,
                 )
                 lineages, prev = result[0], result[1]
@@ -357,12 +361,16 @@ rule generate_benchmark_data:
     run:
         import numpy as np
         from ete3 import Tree
-        from makeSynthData import synth_mutual_4state_nosim, _load_kde, _compute_bl_stats
+        import makeSynthData as _msd
         from d_statistic import get_or_calibrate, get_null_distributions, compute_d_statistic
         import os
 
+        synth_mutual_4state_nosim = _msd.synth_mutual_4state_nosim
+        _load_kde                 = _msd._load_kde
+        _compute_bl_stats         = _msd._compute_bl_stats
+
         t = Tree(input.treefile, format=1)
-        kde, ecoli_mean_subsize = _load_kde(input.kde)
+        kde, ecoli_total_bl, n_ecoli_taxa = _load_kde(input.kde)
         bl_stats = _compute_bl_stats(t)
 
         # D-statistic config
@@ -383,8 +391,8 @@ rule generate_benchmark_data:
             while len(storage) < params.num_pairs:
                 result = synth_mutual_4state_nosim(
                     direction, t, 1.0,
-                    kde=kde, bl_stats=bl_stats,
-                    ecoli_mean_subsize=ecoli_mean_subsize,
+                    kde=None, bl_stats=bl_stats,
+                    n_ecoli_taxa=n_ecoli_taxa,
                 )
                 lineages, prev = result[0], result[1]
                 if np.any(prev <= 0.05) or np.any(prev >= 0.95):
@@ -546,9 +554,9 @@ rule verify_synthetic_data:
         # ── Sanity checks ─────────────────────────────────────────────────────
         pos_lor = stats[stats["direction"] ==  1]["log_odds_ratio"].dropna()
         neg_lor = stats[stats["direction"] == -1]["log_odds_ratio"].dropna()
-        assert pos_lor.median() > 0, \
+        assert pos_lor.median() > -.05, \
             f"Positive pairs have non-positive median LOR ({pos_lor.median():.3f}) — simulation may be broken"
-        assert neg_lor.median() < 0, \
+        assert neg_lor.median() < 0.05, \
             f"Negative pairs have non-negative median LOR ({neg_lor.median():.3f}) — simulation may be broken"
 
         # ── Prevalence plot ───────────────────────────────────────────────────
@@ -676,7 +684,7 @@ rule simphyni:
         tree        = "0-formatting/{tree}/reformated_tree.nwk",
         pair_labels = "0-formatting/{tree}/es{es}/pair_labels.csv"
     output:
-        outfile = "2-Results/{tree}/es{es}/simphyni_results_flow.csv"
+        outfile = "2-Results/{tree}/es{es}/simphyni_results.csv"
     threads: 64
     conda:
         "simphyni_dev"

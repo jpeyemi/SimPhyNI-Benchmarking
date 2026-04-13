@@ -22,8 +22,8 @@ def _load_acr(path='pastmlout_marginal.csv'):
     if path not in _ACR_CACHE:
         df = pd.read_csv(path)
         df = df[(df['gain_subsize'] > 0) & (df['loss_subsize'] > 0)].copy()
-        df['g'] = df['gains'] / df['gain_subsize']
-        df['l'] = df['losses'] / df['loss_subsize']
+        df['g'] = df['gains_flow'] / df['gain_subsize_marginal']
+        df['l'] = df['losses_flow'] / df['loss_subsize_marginal']
         df = df[(df['g'] > 0) & (df['l'] > 0)].reset_index(drop=True)
         _ACR_CACHE[path] = df
     return _ACR_CACHE[path]
@@ -61,8 +61,336 @@ def _compute_bl_stats(t):
     bl_mean = np.mean(branch_lengths[branch_lengths <= upper_bound])
     return upper_bound, bl_mean
 
-
+# ── π / λ / OR helpers ────────────────────────────────────────────────────────
+ 
+def _stationary_from_or(pi1, pi2, OR):
+    """Solve for the 4-state stationary distribution given marginal
+    prevalences and an odds ratio.
+ 
+    States use the same bit encoding as the rest of the file:
+      0 = (trait1=0, trait2=0)
+      1 = (trait1=1, trait2=0)   [state & 1]
+      2 = (trait1=0, trait2=1)   [(state & 2) >> 1]
+      3 = (trait1=1, trait2=1)
+ 
+    OR = p11 * p00 / (p10 * p01)
+ 
+    Derivation
+    ----------
+    Substituting p10 = pi1 - p11, p01 = pi2 - p11, p00 = 1 - pi1 - pi2 + p11
+    into the OR definition and rearranging gives the Cornfield quadratic:
+ 
+      (1 - OR) * p11^2
+      + (1 - pi1 - pi2 + OR*(pi1 + pi2)) * p11
+      - OR * pi1 * pi2
+      = 0
+ 
+    The physically valid root is the one in (max(0, pi1+pi2-1), min(pi1, pi2)).
+    For OR > 1 we take the larger root (more co-occurrence than independence);
+    for OR < 1 we take the smaller root.  OR == 1 reduces to independence:
+    p11 = pi1 * pi2.
+ 
+    Parameters
+    ----------
+    pi1, pi2 : float — marginal prevalences in (0, 1)
+    OR       : float — target odds ratio; must be > 0
+ 
+    Returns
+    -------
+    stat : np.ndarray shape (4,) — stationary probabilities [p00, p10, p01, p11]
+    """
+    lo = max(0.0, pi1 + pi2 - 1.0) + 1e-9
+    hi = min(pi1, pi2) - 1e-9
+ 
+    if hi <= lo:
+        # Degenerate case: marginals leave no room — return independence
+        p11 = float(np.clip(pi1 * pi2, 0.0, 1.0))
+    elif abs(OR - 1.0) < 1e-10:
+        p11 = pi1 * pi2
+    else:
+        a = 1.0 - OR
+        b = 1.0 - pi1 - pi2 + OR * (pi1 + pi2)
+        c = -OR * pi1 * pi2
+        disc = max(b ** 2 - 4.0 * a * c, 0.0)
+        x1 = (-b + np.sqrt(disc)) / (2.0 * a)
+        x2 = (-b - np.sqrt(disc)) / (2.0 * a)
+        # Both roots may or may not be in the valid range
+        valid = sorted([x for x in (x1, x2) if lo <= x <= hi])
+        if valid:
+            # OR > 1 → positive association → want larger p11
+            # OR < 1 → negative association → want smaller p11
+            p11 = valid[-1] if OR > 1.0 else valid[0]
+        else:
+            # Fallback: independence, clamped
+            p11 = float(np.clip(pi1 * pi2, lo, hi))
+ 
+    p11 = float(np.clip(p11, lo, hi))
+    p10 = pi1 - p11
+    p01 = pi2 - p11
+    p00 = 1.0 - pi1 - pi2 + p11
+ 
+    stat = np.array([p00, p10, p01, p11], dtype=float)
+    stat = np.clip(stat, 1e-12, None)
+    stat /= stat.sum()
+    return stat
+ 
+ 
+def _build_Q_reversible(stat, lam):
+    """Build a reversible 4-state Q matrix from a stationary distribution.
+ 
+    Construction
+    ------------
+    Setting Q[i, j] = k * stat[j] for connected pairs (i, j) satisfies
+    detailed balance exactly:
+ 
+        stat[i] * Q[i, j] = k * stat[i] * stat[j] = stat[j] * Q[j, i]
+ 
+    Only single-bit transitions are permitted (no simultaneous flips):
+        0 ↔ 1 : trait1 changes, trait2 = 0 background  (00 ↔ 10)
+        0 ↔ 2 : trait2 changes, trait1 = 0 background  (00 ↔ 01)
+        1 ↔ 3 : trait2 changes, trait1 = 1 background  (10 ↔ 11)
+        2 ↔ 3 : trait1 changes, trait2 = 1 background  (01 ↔ 11)
+ 
+    The overall scale k is chosen so that the stationary-distribution-weighted
+    mean exit rate equals lam (the scaled total rate λ from the π/λ
+    decomposition), giving a physically interpretable rate magnitude.
+ 
+    Parameters
+    ----------
+    stat : array-like shape (4,) — stationary distribution [p00, p10, p01, p11]
+    lam  : float — target mean exit rate (= scaled λ for the target tree)
+ 
+    Returns
+    -------
+    Q : np.ndarray shape (4, 4) — generator matrix (rows sum to 0)
+    """
+    stat = np.asarray(stat, dtype=float)
+    Q = np.zeros((4, 4))
+ 
+    for i, j in [(0, 1), (0, 2), (1, 3), (2, 3)]:
+        Q[i, j] = stat[j]
+        Q[j, i] = stat[i]
+ 
+    # Stationary-weighted mean exit rate before scaling
+    raw_exit = float(np.dot(stat, Q.sum(axis=1)))
+    if raw_exit > 0.0:
+        Q *= lam / raw_exit
+ 
+    # Set diagonal so each row sums to zero
+    np.fill_diagonal(Q, 0.0)
+    np.fill_diagonal(Q, -Q.sum(axis=1))
+    return Q
+ 
+ 
+# ── Main simulation function ──────────────────────────────────────────────────
+ 
 def synth_mutual_4state_nosim(dir, t, mod,
+                              kde=None, bl_stats=None,
+                              n_ecoli_taxa=None,
+                              gamma_alpha=None):
+    """Simulate a pair of binary traits under a 4-state CTMC model.
+ 
+    New default path: π / λ / OR parameterisation
+    ---------------------------------------------
+    Effect size is encoded as an odds ratio derived from mod:
+ 
+        OR_base = 10^(2 * mod)
+ 
+    and direction controls the sign:
+ 
+        dir =  1  →  positive association  (OR = OR_base)
+        dir =  0  →  no association        (OR = 1)
+        dir = -1  →  negative association  (OR = 1 / OR_base)
+ 
+    Rate sampling from the empirical ACR data is decomposed into two
+    orthogonal quantities that are scaled independently:
+ 
+        π   = g / (g + l)   — equilibrium prevalence; tree-invariant; never scaled
+        λ   = g + l          — total rate;  scaled by ecoli_total_bl / target_total_bl
+ 
+    The 4-state stationary distribution is solved analytically from
+    (π1, π2, effective_OR) via the Cornfield quadratic so that marginal
+    prevalences are guaranteed at stationarity regardless of mod or tree
+    topology.  A reversible Q matrix is then built from this stationary
+    distribution and scaled to λ.
+ 
+    This decouples three sources of variation:
+        • prevalence  ← π  (empirical distribution, tree-invariant)
+        • effect size ← OR (set by mod, independent of rates)
+        • transitions ← λ  (scaled to tree, controls D-statistic)
+ 
+    Legacy KDE path
+    ---------------
+    If kde is not None the function falls back to the original
+    total_bl_ntaxa scaling method for backward compatibility.
+ 
+    Parameters
+    ----------
+    dir          : int, -1 / 0 / 1 — direction of association
+    t            : ete3.Tree
+    mod          : float — effect-size modifier; OR_base = 10^(2*mod)
+    kde          : KDE object or None; if supplied uses legacy path
+    bl_stats     : (upper_bound, bl_mean) from _compute_bl_stats (optional)
+    n_ecoli_taxa : int — kept for signature compatibility; unused in new path
+    gamma_alpha  : float or None — if set, branch lengths are gamma-scaled
+ 
+    Returns
+    -------
+    lineages  : np.ndarray shape (n_leaves, 2) — trait1, trait2 per leaf
+    prev      : np.ndarray shape (2,)           — tip prevalences
+    gain_rates: list[float, float]              — scaled gain rates used
+    loss_rates: list[float, float]              — scaled loss rates used
+    zeros     : np.ndarray shape (2,)           — placeholder (legacy compat)
+    leaves    : list[ete3.Node]                 — leaf nodes in sim order
+    """
+    num_nodes = len(t.get_descendants()) + 1
+    node_map = {node: idx for idx, node in enumerate([t] + t.get_descendants())}
+    leaves = []
+ 
+    # Always load tree metadata from KDE pkl (cached; fast after first call)
+    _, ecoli_total_bl, _loaded_n_ecoli = _load_kde()
+ 
+    if bl_stats is None:
+        bl_stats = _compute_bl_stats(t)
+    upper_bound, bl_mean = bl_stats
+ 
+    # IQR-filtered total branch length of the target tree
+    total_bl = sum(
+        min(n.dist, upper_bound)
+        for n in t.traverse()
+        if not n.is_root() and n.dist > 0
+    )
+ 
+    # ── Branch: legacy KDE path ───────────────────────────────────────────────
+    if kde is not None:
+        samples = kde.resample(2)
+        gains_raw = 10 ** samples[0]
+        losses_raw = 10 ** samples[1]
+        root_state_bits = np.rint(samples[2]).astype(int)
+        root_state = int(f'{root_state_bits[1]:0b}{root_state_bits[0]:0b}', 2)
+ 
+        n_target_taxa = len(t.get_leaves())
+        if n_ecoli_taxa is None:
+            n_ecoli_taxa = _loaded_n_ecoli or n_target_taxa
+        if ecoli_total_bl is not None and ecoli_total_bl > 0 and total_bl > 0:
+            gain_rates = gains_raw * (ecoli_total_bl / total_bl) * (n_target_taxa / n_ecoli_taxa)
+            loss_rates = losses_raw * (ecoli_total_bl / total_bl) * (n_target_taxa / n_ecoli_taxa)
+        else:
+            gain_rates = gains_raw * 0.00603 / bl_mean
+            loss_rates = losses_raw * 0.00603 / bl_mean
+ 
+        gain_modifier = [10 ** (-mod), 1, 10 ** (mod)]
+        loss_modifier = [10 ** (mod),  1, 10 ** (-mod)]
+ 
+        Q = np.zeros((4, 4))
+        unnorm_rates = {
+            0: {1: gain_rates[0], 2: gain_rates[1]},
+            1: {0: loss_rates[0], 3: gain_rates[1] * gain_modifier[dir + 1]},
+            2: {0: loss_rates[1], 3: gain_rates[0] * gain_modifier[dir + 1]},
+            3: {1: loss_rates[1] * loss_modifier[dir + 1],
+                2: loss_rates[0] * loss_modifier[dir + 1]},
+        }
+        for i in range(4):
+            for j in unnorm_rates[i]:
+                Q[i, j] = unnorm_rates[i][j]
+            Q[i, i] = -np.sum(Q[i, :])
+ 
+    # ── Branch: π / λ / OR path (default) ────────────────────────────────────
+    else:
+        df_acr = _load_acr()
+ 
+        # Sample two independent (g, l) pairs from the empirical ACR distribution
+        rows = df_acr.sample(n=2, replace=True)
+        g_raw = rows['g'].values.astype(float)
+        l_raw = rows['l'].values.astype(float)
+ 
+        # Decompose into π (prevalence) and λ (total rate)
+        lam_raw = g_raw + l_raw                # shape (2,)
+        pi      = g_raw / lam_raw              # shape (2,); tree-invariant
+ 
+        # Scale λ to the target tree; π is never modified
+        f          = (ecoli_total_bl / total_bl
+                      if (ecoli_total_bl and total_bl > 0) else 1.0)
+        lam_scaled = lam_raw * f               # shape (2,)
+ 
+        # Reconstruct gain/loss rates for output and legacy callers
+        gain_rates = pi          * lam_scaled  # shape (2,)
+        loss_rates = (1.0 - pi) * lam_scaled   # shape (2,)
+ 
+        # Convert mod → effective OR; direction controls sign
+        #   dir= 1 → OR = 10^(2*mod)       (positive association)
+        #   dir= 0 → OR = 1                 (independence)
+        #   dir=-1 → OR = 10^(-2*mod)       (negative association)
+        OR_base      = 10.0 ** (2.0 * mod)
+        effective_OR = float(OR_base ** dir)   # 1.0 when dir=0
+ 
+        # Clip π values to avoid numerically degenerate stationary distributions
+        pi1 = float(np.clip(pi[0], 0.02, 0.98))
+        pi2 = float(np.clip(pi[1], 0.02, 0.98))
+ 
+        # Solve for the 4-state stationary distribution analytically
+        stat = _stationary_from_or(pi1, pi2, effective_OR)
+ 
+        # Use geometric mean of the two traits' λ as the Q-matrix scale
+        # (preserves the overall rate magnitude symmetrically across traits)
+        lam_mean = float(np.sqrt(lam_scaled[0] * lam_scaled[1]))
+ 
+        # Build reversible Q matrix satisfying detailed balance
+        Q = _build_Q_reversible(stat, lam_mean)
+ 
+        # Root state drawn from stationary distribution
+        root_state = int(np.random.choice(4, p=stat))
+ 
+    # ── CTMC simulation (shared by both paths) ────────────────────────────────
+    sim = np.zeros(num_nodes, dtype=int)
+    sim[node_map[t]] = root_state
+ 
+    for node in t.traverse(strategy='preorder'):
+        if node.up is None:
+            continue
+ 
+        curr_state = sim[node_map[node.up]]
+        branch_t   = node.dist
+ 
+        if gamma_alpha is not None and branch_t > 0:
+            branch_t = branch_t * np.random.gamma(gamma_alpha, 1.0 / gamma_alpha)
+ 
+        t_remaining = branch_t
+ 
+        while t_remaining > 0:
+            rate_out = -Q[curr_state, curr_state]
+            if rate_out <= 0:
+                break
+            wait_time = np.random.exponential(1.0 / rate_out)
+            if wait_time >= t_remaining:
+                break
+            t_remaining -= wait_time
+            probs = Q[curr_state, :].copy()
+            probs[curr_state] = 0.0
+            prob_sum = probs.sum()
+            if prob_sum <= 0:
+                break
+            probs /= prob_sum
+            curr_state = int(np.random.choice(4, p=probs))
+ 
+        sim[node_map[node]] = curr_state
+        if node.is_leaf():
+            leaves.append(node)
+ 
+    # Decode 4-state simulation back to two binary traits
+    trait1 = (sim & 1).astype(np.int16)
+    trait2 = ((sim & 2) >> 1).astype(np.int16)
+ 
+    lineages = np.stack(
+        [trait1[[node_map[l] for l in leaves]],
+         trait2[[node_map[l] for l in leaves]]],
+        axis=1,
+    )
+    prev = lineages.mean(axis=0)
+ 
+    return lineages, prev, list(gain_rates), list(loss_rates), np.zeros(2), leaves
+
+def synth_mutual_4state_nosim_pilamold(dir, t, mod,
                               kde=None, bl_stats=None,
                               n_ecoli_taxa=None,
                               gamma_alpha=None):

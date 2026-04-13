@@ -71,7 +71,7 @@ if (.Platform$OS.type == "unix") {
 # ─────────────────────────────
 analyze_pair <- function(x, y, trait1, trait2, label, tree) {
   res <- tryCatch(
-    fitPagel(tree, x, y, method = "fitMk", model = "ARD", dep.var = "xy"),
+    fitPagel(tree, x, y, method = "fitMk", model = "ER", dep.var = "xy"),
     error = function(e) NULL
   )
   if (is.null(res)) {

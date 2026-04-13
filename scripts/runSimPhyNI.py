@@ -39,7 +39,7 @@ os.makedirs(os.path.dirname(args.outfile), exist_ok=True)
 # Load and build params
 # ----------------------
 acr_df     = pd.read_csv(args.pastml)
-sim_params = build_sim_params(acr_df, counting='FLOW', subsize='ORIGINAL', no_threshold=False)
+sim_params = build_sim_params(acr_df, counting='JOINTP', subsize='ORIGINAL', no_threshold=False)
 
 pair_labels = pd.read_csv(args.pair_labels)
 
