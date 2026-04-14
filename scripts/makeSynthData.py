@@ -9,6 +9,7 @@ from scipy.special import expit
 _KDE_CACHE = {}
 _ACR_CACHE = {}
 _ACR_HYBRID_CACHE = {}
+_ACR_MARGINAL_CACHE = {}
 
 
 def _load_acr(path='pastmlout_marginal.csv'):
@@ -54,6 +55,34 @@ def _load_acr_hybrid_m(path='pastmlout_marginal.csv'):
         df['pi'] = np.where(gl > 0, g_m / gl, 0.5)
         _ACR_HYBRID_CACHE[path] = df[['lam', 'pi']].reset_index(drop=True)
     return _ACR_HYBRID_CACHE[path]
+
+
+def _load_acr_marginal(path='pastmlout_marginal.csv'):
+    """Load ACR data for the marginal rate model.
+
+    Both π and λ are derived from marginal (flow-based) rates:
+
+        g_marg = gains_flow / gain_subsize_marginal
+        l_marg = losses_flow / loss_subsize_marginal
+        π      = g_marg / (g_marg + l_marg)
+        λ      = g_marg + l_marg
+
+    Genes where either marginal rate is zero are excluded.
+    Cached after first load.
+    """
+    if path not in _ACR_MARGINAL_CACHE:
+        df = pd.read_csv(path)
+        df = df[(df['gain_subsize'] > 0) & (df['loss_subsize'] > 0)].copy()
+        g_m = df['gains_flow'] / df['gain_subsize_marginal']
+        l_m = df['losses_flow'] / df['loss_subsize_marginal']
+        df['g_m'] = g_m
+        df['l_m'] = l_m
+        df = df[(df['g_m'] > 0) & (df['l_m'] > 0)].copy()
+        gl = df['g_m'] + df['l_m']
+        df['lam'] = gl
+        df['pi']  = df['g_m'] / gl
+        _ACR_MARGINAL_CACHE[path] = df[['lam', 'pi']].reset_index(drop=True)
+    return _ACR_MARGINAL_CACHE[path]
 
 
 def _load_kde(path='scripts/kde_model.pkl'):
@@ -424,20 +453,25 @@ def synth_mutual_4state_nosim_p(dir, t, mod,
 def synth_mutual_4state_nosim(dir, t, mod,
                               kde=None, bl_stats=None,
                               n_ecoli_taxa=None,
-                              gamma_alpha=None):
+                              gamma_alpha=None,
+                              mix_p=0.5):
     """Simulate a pair of binary traits under a 4-state CTMC model.
 
-    Default path: hybrid_m — π from marginal rates, λ from integer counts
-    -----------------------------------------------------------------------
-    Rate sampling uses the hybrid_m decomposition:
+    Default path: 50/50 mix of marginal and hybrid_m rate models
+    -------------------------------------------------------------
+    Each trait in a pair independently draws its (π, λ) from one of two pools:
 
-        π   = g_marg / (g_marg + l_marg)
-              where g_marg = gains_flow / gain_subsize_marginal  (correct low-prevalence π)
-        λ   = (gains + losses) / ecoli_total_bl  (integer counts, tree-scaled)
+        marginal  (prob = mix_p):
+            π = g_marg / (g_marg + l_marg),  λ = g_marg + l_marg
+            → higher λ → more transitions → higher D (random/independent)
 
-    This correctly represents low-prevalence genes (median π ≈ 0.11) and
-    naturally includes genes with gains=0 or losses=0, enabling clade-driven
-    (D < 0) simulated traits to appear at realistic frequencies.
+        hybrid_m  (prob = 1 - mix_p):
+            π = g_marg / (g_marg + l_marg),  λ = (gains + losses) / ecoli_total_bl
+            → includes zero-count genes → lower λ → lower / negative D (clade-driven)
+
+    Because each trait draws independently, trait pairs can be drawn from
+    different models, producing a wide D range while preserving the
+    low-prevalence π distribution (median π ≈ 0.11) from both pools.
 
     Effect size is encoded as an odds ratio derived from mod:
 
@@ -451,7 +485,8 @@ def synth_mutual_4state_nosim(dir, t, mod,
 
     The 4-state stationary distribution is solved analytically from
     (π1, π2, effective_OR) via the Cornfield quadratic.  A reversible Q matrix
-    is built from this stationary distribution and scaled to λ.
+    is built from this stationary distribution and scaled to the geometric
+    mean of the two traits' λ values.
 
     Legacy KDE path
     ---------------
@@ -467,6 +502,8 @@ def synth_mutual_4state_nosim(dir, t, mod,
     bl_stats     : (upper_bound, bl_mean) from _compute_bl_stats (optional)
     n_ecoli_taxa : int — kept for signature compatibility; unused in new path
     gamma_alpha  : float or None — if set, branch lengths are gamma-scaled
+    mix_p        : float in [0, 1] — probability each trait draws from the
+                   marginal pool; default 0.5 (50/50 mix)
 
     Returns
     -------
@@ -529,18 +566,22 @@ def synth_mutual_4state_nosim(dir, t, mod,
                 Q[i, j] = unnorm_rates[i][j]
             Q[i, i] = -np.sum(Q[i, :])
 
-    # ── Branch: hybrid_m π / λ / OR path (default) ───────────────────────────
+    # ── Branch: mix of marginal and hybrid_m pools (default) ─────────────────
     else:
-        df_acr = _load_acr_hybrid_m()
+        f = (ecoli_total_bl / total_bl
+             if (ecoli_total_bl and total_bl > 0) else 1.0)
 
-        # Sample two independent (lam, pi) pairs from the empirical distribution
-        rows    = df_acr.sample(n=2, replace=True)
-        lam_raw = rows['lam'].values.astype(float)
-        pi      = rows['pi'].values.astype(float)
+        # Each trait independently draws from marginal (prob=mix_p) or hybrid_m
+        lam_raw = np.empty(2)
+        pi      = np.empty(2)
+        for i in range(2):
+            pool = (_load_acr_marginal() if np.random.rand() < mix_p
+                    else _load_acr_hybrid_m())
+            row       = pool.sample(n=1).iloc[0]
+            lam_raw[i] = float(row['lam'])
+            pi[i]      = float(row['pi'])
 
         # Scale λ to the target tree; π is never modified
-        f          = (ecoli_total_bl / total_bl
-                      if (ecoli_total_bl and total_bl > 0) else 1.0)
         lam_scaled = lam_raw * f
 
         # Reconstruct gain/loss rates for output and legacy callers
