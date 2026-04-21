@@ -86,8 +86,10 @@ def recompute_pair_labels(
     # ── Locate synthetic data ─────────────────────────────────────────────────
     synth_path = data_dir / "synthetic_data.csv"
     if not synth_path.is_file():
-        print(f"  SKIP  no synthetic_data.csv in {data_dir}")
-        return False
+        synth_path = data_dir / "reformated_systems.csv"
+        if not synth_path.is_file():
+            print(f"  SKIP  no synthetic_data.csv in {data_dir}")
+            return False
 
     # ── Locate tree ───────────────────────────────────────────────────────────
     tree_path = find_tree(data_dir)
@@ -180,7 +182,7 @@ def recompute_pair_labels(
         d1 = compute_d_statistic(tree_structure, ord1, rm1, bm1)
         d2 = compute_d_statistic(tree_structure, ord2, rm2, bm2)
         finite = [v for v in (d1, d2) if not np.isnan(v)]
-        d_pair = float(max(finite)) if finite else float("nan")
+        d_pair = float(min(finite)) if finite else float("nan") #recomputes to min 
 
         new_d1.append(d1)
         new_d2.append(d2)

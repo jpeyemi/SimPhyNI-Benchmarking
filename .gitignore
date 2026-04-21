@@ -1,0 +1,13 @@
+logs/
+0-formatting/
+0-GenerateTrees/
+1-PastML-api/
+2-Results/
+benchmark-acr/
+.snakemake/
+.claude/
+Legacy-Simulation/
+goldfinder/
+mainerr.txt
+mainout.txt
+analysis/

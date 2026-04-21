@@ -81,17 +81,17 @@ def process_tree(input_tree, output_tree):
 rule all:
     input: #Rerun for flow
         "scripts/kde_model.pkl",
-        expand("2-Results/{tree}/es{es}/simphyni_results.csv",     tree=ALL_TREES, es=ES_IDX),
-        # expand("2-Results/{tree}/es{es}/htreewas_terminal.csv",    tree=ALL_TREES, es=ES_IDX),
+        expand("2-Results/{tree}/es{es}/simphyni_results_flow.csv",     tree=ALL_TREES, es=ES_IDX),
+        expand("2-Results/{tree}/es{es}/htreewas_terminal.csv",    tree=ALL_TREES, es=ES_IDX),
         expand("2-Results/{tree}/es{es}/scoary_results.csv",       tree=ALL_TREES, es=ES_IDX),
-        # expand("2-Results/{tree}/es{es}/pagel_results.csv",        tree=ALL_TREES, es=ES_IDX),
-        # expand("2-Results/{tree}/es{es}/fastlmm_results.csv",      tree=ALL_TREES, es=ES_IDX),
-        # expand("2-Results/{tree}/es{es}/spydrpick_results.csv",    tree=ALL_TREES, es=ES_IDX),
-        # expand("2-Results/{tree}/es{es}/coinfinder_results.csv",   tree=ALL_TREES, es=ES_IDX),
+        expand("2-Results/{tree}/es{es}/pagel_results_ARD.csv",        tree=ALL_TREES, es=ES_IDX),
+        expand("2-Results/{tree}/es{es}/fastlmm_results.csv",      tree=ALL_TREES, es=ES_IDX),
+        expand("2-Results/{tree}/es{es}/spydrpick_results.csv",    tree=ALL_TREES, es=ES_IDX),
+        expand("2-Results/{tree}/es{es}/coinfinder_results.csv",   tree=ALL_TREES, es=ES_IDX),
         expand("0-GenerateTrees/{tree}/es{es}/synth_stats.csv",    tree=ALL_TREES, es=ES_IDX),
         expand("benchmark-acr/{bench}/acr_benchmark/method_ranking.csv",       bench=BENCH_TREES),
         expand("benchmark-acr/{bench}/acr_benchmark/stability_fans/.done",     bench=BENCH_TREES),
-        # expand("2-Results/{tree}/es{es}/paramtraversal.csv", tree=ALL_TREES, es=ES_IDX[0:3]),
+        expand("2-Results/{tree}/es{es}/paramtraversal.csv", tree=ALL_TREES, es=ES_IDX[0:3]),
 
 
 # ──────────────────────────────────────────────
@@ -684,7 +684,7 @@ rule simphyni:
         tree        = "0-formatting/{tree}/reformated_tree.nwk",
         pair_labels = "0-formatting/{tree}/es{es}/pair_labels.csv"
     output:
-        outfile = "2-Results/{tree}/es{es}/simphyni_results.csv"
+        outfile = "2-Results/{tree}/es{es}/simphyni_results_flow.csv"
     threads: 64
     conda:
         "simphyni_dev"
@@ -741,7 +741,7 @@ rule runPagel:
         tree        = "0-formatting/{tree}/reformated_tree.nwk",
         pair_labels = "0-formatting/{tree}/es{es}/pair_labels.csv"
     output:
-        outfile = "2-Results/{tree}/es{es}/pagel_results.csv"
+        outfile = "2-Results/{tree}/es{es}/pagel_results_ARD.csv"
     conda:
         'envs/R.yaml'
     shell:
