@@ -38,6 +38,7 @@ figure_data/simphyni_effects.csv   — SimPhyNI inferred effect sizes per pair
 figure_data/pr_auc_bins.csv        — (copy) PR-AUC binned by D-statistic
 figure_data/all_metrics.csv        — (copy) aggregate metrics per method/tree/es
 figure_data/pr_auc_summary.csv     — (copy) PR-AUC summary by method/stratum
+figure_data/paramtraversal.csv       — concatenated paramtraversal grids (tree × es)
 figure_data/stability_trajectory.csv — concatenated ACR stability trajectories
 figure_data/stability.csv          — concatenated ACR calibration metrics
 figure_data/method_ranking.csv     — concatenated ACR method rankings
@@ -65,6 +66,7 @@ BENCH_ROOT   = REPO_ROOT / 'benchmark-acr'
 OUT_DIR      = REPO_ROOT / 'figure_data'
 
 EFFECT_SIZES = ['es0', 'es1', 'es2', 'es3', 'es4', 'es5']
+ES_INPUT_MAP = {'es0': 3.0, 'es1': 2.0, 'es2': 1.0, 'es3': 0.75, 'es4': 0.5, 'es5': 0.25}
 
 # ── Bootstrap analysis imports ────────────────────────────────────────────────
 # Reuse the per-pair loader infrastructure from the analysis scripts.
@@ -187,7 +189,49 @@ def collect_simphyni_effects() -> pd.DataFrame:
     return result
 
 
-# ── Task 4: stability trajectories ───────────────────────────────────────────
+# ── Task 4: paramtraversal grid ──────────────────────────────────────────────
+
+def collect_paramtraversal() -> pd.DataFrame:
+    """
+    Concatenate paramtraversal.csv files from 2-Results/{tree}/{es}/ across
+    all available trees and effect sizes.  Adds 'tree', 'effect_size', and
+    'es_input' columns so the notebook can group/filter without re-reading
+    directory names.
+
+    Columns: tree, effect_size, es_input, Method, Statistic, Threshold,
+             Bonferroni, Precision_Negative, Recall_Negative, F1_Negative,
+             Precision_Positive, Recall_Positive, F1_Positive,
+             AUC_ROC_Negative, PR_AUC_Negative, AUC_ROC_Positive,
+             PR_AUC_Positive, FDR_Negative, FPR_Negative, FDR_Positive,
+             FPR_Positive
+    (Accuracy is dropped — it conflates pos/neg performance.)
+    """
+    print('\n[4] Collecting paramtraversal grid results …')
+    frames = []
+    trees = sorted(d.name for d in RESULTS_ROOT.iterdir() if d.is_dir())
+    for tree in trees:
+        for es in EFFECT_SIZES:
+            path = RESULTS_ROOT / tree / es / 'paramtraversal.csv'
+            if not path.exists():
+                continue
+            df = pd.read_csv(path)
+            df.drop(columns=['Accuracy'], errors='ignore', inplace=True)
+            df.insert(0, 'es_input', ES_INPUT_MAP[es])
+            df.insert(0, 'effect_size', es)
+            df.insert(0, 'tree', tree)
+            frames.append(df)
+            print(f'    read  {path.relative_to(REPO_ROOT)}  ({len(df):,} rows)')
+
+    if not frames:
+        warnings.warn(f'No paramtraversal.csv files found under {RESULTS_ROOT}')
+        return pd.DataFrame()
+
+    result = pd.concat(frames, ignore_index=True)
+    print(f'    → {len(result):,} rows total')
+    return result
+
+
+# ── Task 5: stability trajectories ───────────────────────────────────────────
 
 def collect_stability_trajectories() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
@@ -196,7 +240,7 @@ def collect_stability_trajectories() -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
 
     Adds a 'bench' column to each table.
     """
-    print('\n[4] Collecting ACR stability trajectories …')
+    print('\n[5] Collecting ACR stability trajectories …')
     traj_frames, stab_frames, rank_frames = [], [], []
 
     bench_dirs = sorted(BENCH_ROOT.glob('bench_*'))
@@ -253,7 +297,14 @@ def main() -> None:
     effects.to_csv(out, index=False)
     print(f'  saved  {out.relative_to(REPO_ROOT)}')
 
-    # 4. Stability trajectories
+    # 4. Paramtraversal grid
+    paramtraversal = collect_paramtraversal()
+    if not paramtraversal.empty:
+        out = OUT_DIR / 'paramtraversal.csv'
+        paramtraversal.to_csv(out, index=False)
+        print(f'  saved  {out.relative_to(REPO_ROOT)}')
+
+    # 5. Stability trajectories
     traj, stab, rank = collect_stability_trajectories()
     for df, name in [(traj, 'stability_trajectory.csv'),
                      (stab, 'stability.csv'),
@@ -263,8 +314,8 @@ def main() -> None:
             df.to_csv(out, index=False)
             print(f'  saved  {out.relative_to(REPO_ROOT)}')
 
-    # 5. Copy pre-computed analysis outputs
-    print('\n[5] Copying pre-computed analysis outputs …')
+    # 6. Copy pre-computed analysis outputs
+    print('\n[6] Copying pre-computed analysis outputs …')
     for fname in ['pr_auc_bins.csv', 'all_metrics.csv', 'pr_auc_summary.csv']:
         _copy(ANALYSIS_DIR / fname, OUT_DIR / fname)
 
