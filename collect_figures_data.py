@@ -66,7 +66,7 @@ BENCH_ROOT   = REPO_ROOT / 'benchmark-acr'
 OUT_DIR      = REPO_ROOT / 'figure_data'
 
 EFFECT_SIZES = ['es0', 'es1', 'es2', 'es3', 'es4', 'es5']
-ES_INPUT_MAP = {'es0': 3.0, 'es1': 2.0, 'es2': 1.0, 'es3': 0.75, 'es4': 0.5, 'es5': 0.25}
+ES_INPUT_MAP = {'es0': 0, 'es1': 0.15, 'es2': 0.5, 'es3': 0.7, 'es4': 1, 'es5': 2}
 
 # ── Bootstrap analysis imports ────────────────────────────────────────────────
 # Reuse the per-pair loader infrastructure from the analysis scripts.

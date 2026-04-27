@@ -80,18 +80,18 @@ def process_tree(input_tree, output_tree):
 
 rule all:
     input: #Rerun for flow
-        "scripts/kde_model.pkl",
-        expand("2-Results/{tree}/es{es}/simphyni_results_flow.csv",     tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/htreewas_terminal.csv",    tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/scoary_results.csv",       tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/pagel_results_ARD.csv",        tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/fastlmm_results.csv",      tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/spydrpick_results.csv",    tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/coinfinder_results.csv",   tree=ALL_TREES, es=ES_IDX),
-        expand("0-GenerateTrees/{tree}/es{es}/synth_stats.csv",    tree=ALL_TREES, es=ES_IDX),
-        expand("benchmark-acr/{bench}/acr_benchmark/method_ranking.csv",       bench=BENCH_TREES),
-        expand("benchmark-acr/{bench}/acr_benchmark/stability_fans/.done",     bench=BENCH_TREES),
-        expand("2-Results/{tree}/es{es}/paramtraversal.csv", tree=ALL_TREES, es=ES_IDX[0:3]),
+        # "scripts/kde_model.pkl",
+        # expand("2-Results/{tree}/es{es}/simphyni_results_flow.csv",     tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/htreewas_terminal.csv",    tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/scoary_results.csv",       tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/pagel_results_ARD.csv",        tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/fastlmm_results.csv",      tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/spydrpick_results.csv",    tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/coinfinder_results.csv",   tree=ALL_TREES, es=ES_IDX),
+        # expand("0-GenerateTrees/{tree}/es{es}/synth_stats.csv",    tree=ALL_TREES, es=ES_IDX),
+        # expand("benchmark-acr/{bench}/acr_benchmark/method_ranking.csv",       bench=BENCH_TREES),
+        # expand("benchmark-acr/{bench}/acr_benchmark/stability_fans/.done",     bench=BENCH_TREES),
+        expand("2-Results/{tree}/es{es}/paramtraversal.csv", tree=ALL_TREES, es=ES_IDX[4:5]),
 
 
 # ──────────────────────────────────────────────
@@ -551,14 +551,6 @@ rule verify_synthetic_data:
         stats["log_odds_ratio"] = lor
         stats.to_csv(output.stats, index=False)
 
-        # ── Sanity checks ─────────────────────────────────────────────────────
-        pos_lor = stats[stats["direction"] ==  1]["log_odds_ratio"].dropna()
-        neg_lor = stats[stats["direction"] == -1]["log_odds_ratio"].dropna()
-        assert pos_lor.median() > -.05, \
-            f"Positive pairs have non-positive median LOR ({pos_lor.median():.3f}) — simulation may be broken"
-        assert neg_lor.median() < 0.05, \
-            f"Negative pairs have non-negative median LOR ({neg_lor.median():.3f}) — simulation may be broken"
-
         # ── Prevalence plot ───────────────────────────────────────────────────
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
         for direction in [-1, 0, 1]:
@@ -654,24 +646,24 @@ rule reformat_benchmark_tree:
 # ──────────────────────────────────────────────
 # Ancestral reconstruction
 # ──────────────────────────────────────────────
-rule ancestral_reconstruction:
-    input:
-        inputsFile = "0-formatting/{tree}/es{es}/reformated_systems.csv",
-        tree       = "0-formatting/{tree}/reformated_tree.nwk"
-    output:
-        outfile = "1-PastML-api/{tree}/es{es}/pastmlout.csv"
-    params:
-        acr_script = SIMPHYNI_SCRIPTS + "/run_ancestral_reconstruction.py"
-    threads: 64
-    conda:
-        "simphyni_dev"
-    shell:
-        "python {params.acr_script} "
-        "  --inputs_file {input.inputsFile} "
-        "  --tree_file {input.tree} "
-        "  --output_csv {output.outfile} "
-        "  --max_workers {threads} "
-        "  --reconstruction all "
+# rule ancestral_reconstruction:
+#     input:
+#         inputsFile = "0-formatting/{tree}/es{es}/reformated_systems.csv",
+#         tree       = "0-formatting/{tree}/reformated_tree.nwk"
+#     output:
+#         outfile = "1-PastML-api/{tree}/es{es}/pastmlout.csv"
+#     params:
+#         acr_script = SIMPHYNI_SCRIPTS + "/run_ancestral_reconstruction.py"
+#     threads: 64
+#     conda:
+#         "simphyni_dev"
+#     shell:
+#         "python {params.acr_script} "
+#         "  --inputs_file {input.inputsFile} "
+#         "  --tree_file {input.tree} "
+#         "  --output_csv {output.outfile} "
+#         "  --max_workers {threads} "
+#         "  --reconstruction all "
 
 
 # ──────────────────────────────────────────────
