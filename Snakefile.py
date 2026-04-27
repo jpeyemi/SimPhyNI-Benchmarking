@@ -80,18 +80,18 @@ def process_tree(input_tree, output_tree):
 
 rule all:
     input: #Rerun for flow
-        "scripts/kde_model.pkl",
-        expand("2-Results/{tree}/es{es}/simphyni_results_flow.csv",     tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/htreewas_terminal.csv",    tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/scoary_results.csv",       tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/pagel_results_ARD.csv",        tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/fastlmm_results.csv",      tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/spydrpick_results.csv",    tree=ALL_TREES, es=ES_IDX),
-        expand("2-Results/{tree}/es{es}/coinfinder_results.csv",   tree=ALL_TREES, es=ES_IDX),
-        expand("0-GenerateTrees/{tree}/es{es}/synth_stats.csv",    tree=ALL_TREES, es=ES_IDX),
-        expand("benchmark-acr/{bench}/acr_benchmark/method_ranking.csv",       bench=BENCH_TREES),
-        expand("benchmark-acr/{bench}/acr_benchmark/stability_fans/.done",     bench=BENCH_TREES),
-        expand("2-Results/{tree}/es{es}/paramtraversal.csv", tree=ALL_TREES, es=ES_IDX[0:3]),
+        # "scripts/kde_model.pkl",
+        # expand("2-Results/{tree}/es{es}/simphyni_results_flow.csv",     tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/htreewas_terminal.csv",    tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/scoary_results.csv",       tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/pagel_results_ARD.csv",        tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/fastlmm_results.csv",      tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/spydrpick_results.csv",    tree=ALL_TREES, es=ES_IDX),
+        # expand("2-Results/{tree}/es{es}/coinfinder_results.csv",   tree=ALL_TREES, es=ES_IDX),
+        # expand("0-GenerateTrees/{tree}/es{es}/synth_stats.csv",    tree=ALL_TREES, es=ES_IDX),
+        # expand("benchmark-acr/{bench}/acr_benchmark/method_ranking.csv",       bench=BENCH_TREES),
+        # expand("benchmark-acr/{bench}/acr_benchmark/stability_fans/.done",     bench=BENCH_TREES),
+        expand("2-Results/{tree}/es{es}/paramtraversal_v2.csv", tree=ALL_TREES, es=ES_IDX[4:5]),
 
 
 # ──────────────────────────────────────────────
@@ -901,5 +901,23 @@ rule ParamTraversal:
         "simphyni_dev"
     shell:
         "python scripts/runParamTraversal.py "
+        "  --pastml {input.pastml} --systems {input.systems} --tree {input.tree} "
+        "  --pair_labels {input.pair_labels} --outfile {output.annotation}"
+
+
+# Optional: updated parameter traversal with per-statistic null distributions
+# and FLOW counting support (not in rule all by default)
+rule ParamTraversalV2:
+    input:
+        pastml      = "1-PastML-api/{tree}/es{es}/pastmlout.csv",
+        systems     = "0-formatting/{tree}/es{es}/reformated_systems.csv",
+        tree        = "0-formatting/{tree}/reformated_tree.nwk",
+        pair_labels = "0-formatting/{tree}/es{es}/pair_labels.csv"
+    output:
+        annotation = "2-Results/{tree}/es{es}/paramtraversal_v2.csv"
+    conda:
+        "simphyni_dev"
+    shell:
+        "python scripts/runParamTraversal_v2.py "
         "  --pastml {input.pastml} --systems {input.systems} --tree {input.tree} "
         "  --pair_labels {input.pair_labels} --outfile {output.annotation}"
