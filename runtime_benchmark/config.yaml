@@ -1,0 +1,5 @@
+n_leaves:   [100, 500, 1000]
+n_traits:   [10, 100, 1000]
+replicates: [0, 1, 2]
+threads:    16
+time_limit_min: 180   # 3-hour wall-clock limit per job

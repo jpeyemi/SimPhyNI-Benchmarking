@@ -1,0 +1,20 @@
+# R environment for TreeWAS and Pagel runtime benchmarks.
+# Extends the root envs/R.yaml with packages required by the bench scripts.
+name: r-bench
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - r-base
+  - r-devtools
+  - r-argparse
+  - r-ape
+  - r-phytools
+  - r-future
+  - r-future.apply
+  - r-data.table
+  - r-parallel
+  - r-dplyr
+  - r-tidyr
+  - r-ggplot2

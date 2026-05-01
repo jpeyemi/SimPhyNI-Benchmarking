@@ -1,0 +1,58 @@
+{
+    "documentation": {
+        "cmdline": "Run via snakemakeslurm.sh in this directory"
+    },
+    "__default__": {
+        "job-name"      : "RTbench.{rule}",
+        "ntasks"        : 1,
+        "partition"     : "mit_normal,sched_mit_hill,sched_any,newnodes",
+        "exclude"       : "node2429",
+        "time"          : "03:00:00",
+        "cpus-per-task" : 16,
+        "mem"           : 64000,
+        "mail-user"     : "obal@mit.edu",
+        "mail-type"     : "FAIL",
+        "output"        : "logs/{rule}_%j.out_err.txt",
+        "error"         : "logs/{rule}_%j.out_err.txt"
+    },
+    "generate_data": {
+        "time"          : "0:10:00",
+        "cpus-per-task" : 1,
+        "mem"           : 4000
+    },
+    "run_simphyni": {
+        "time"          : "03:00:00",
+        "cpus-per-task" : 16,
+        "mem"           : 64000
+    },
+    "run_fastlmm": {
+        "time"          : "03:00:00",
+        "cpus-per-task" : 16,
+        "mem"           : 128000
+    },
+    "run_treewas": {
+        "time"          : "03:00:00",
+        "cpus-per-task" : 16,
+        "mem"           : 128000
+    },
+    "run_pagel": {
+        "time"          : "03:00:00",
+        "cpus-per-task" : 16,
+        "mem"           : 64000
+    },
+    "run_scoary": {
+        "time"          : "03:00:00",
+        "cpus-per-task" : 16,
+        "mem"           : 64000
+    },
+    "run_coinfinder": {
+        "time"          : "03:00:00",
+        "cpus-per-task" : 16,
+        "mem"           : 64000
+    },
+    "collect_runtimes": {
+        "time"          : "0:15:00",
+        "cpus-per-task" : 1,
+        "mem"           : 8000
+    }
+}

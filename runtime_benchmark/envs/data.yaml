@@ -1,0 +1,13 @@
+# Environment for data generation (generate_data.py) and runtime collection (collect_runtimes.py)
+name: bench_data
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.11
+  - ete3>=3.1
+  - msprime>=1.2
+  - numpy>=2.0
+  - pandas>=2.0
+  - matplotlib>=3.8

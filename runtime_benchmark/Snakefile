@@ -1,0 +1,314 @@
+"""
+Runtime Benchmarking Snakefile
+==============================
+27 synthetic datasets × 6 methods = 162 timed jobs.
+
+Dataset key: {n_leaves}_{n_traits}_rep{rep}
+  n_leaves  : 100, 500, 1000
+  n_traits  : 10, 100, 1000
+  rep       : 0, 1, 2
+
+Resources per tool job: 16 CPUs, 3-hour wall-clock limit.
+Timing is captured automatically via Snakemake's benchmark: directive.
+
+Run (from this directory):
+  bash snakemakeslurm.sh           # SLURM cluster
+  conda run -n snakemake snakemake --cores 16 --use-conda   # local
+"""
+
+configfile: "config.yaml"
+
+import os
+import itertools
+
+N_LEAVES   = config["n_leaves"]
+N_TRAITS   = config["n_traits"]
+REPS       = config["replicates"]
+THREADS    = config["threads"]
+TIME_LIMIT = config["time_limit_min"]
+
+DATASETS = [
+    f"{nl}_{nt}_rep{r}"
+    for nl, nt, r in itertools.product(N_LEAVES, N_TRAITS, REPS)
+]
+
+TOOLS = ["SimPhyNI", "FaST-LMM", "TreeWAS", "Pagel", "Scoary", "Coinfinder"]
+
+SCRIPTS      = os.path.join(workflow.basedir, "scripts")
+PARENT_ENVS  = os.path.join(workflow.basedir, "..", "envs")
+PARENT_SCRIPTS = os.path.join(workflow.basedir, "..", "scripts")
+
+
+def dataset_parts(dataset):
+    """Return (n_leaves, n_traits, rep) from '500_100_rep1'."""
+    nl_nt, rep = dataset.rsplit("_rep", 1)
+    nl, nt = nl_nt.split("_")
+    return int(nl), int(nt), int(rep)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rule all
+# ─────────────────────────────────────────────────────────────────────────────
+rule all:
+    input:
+        "runtime_boxplot.svg",
+        "runtime_boxplot_facet.svg",
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Generate synthetic data (tree + binary trait matrix)
+# ─────────────────────────────────────────────────────────────────────────────
+rule generate_data:
+    output:
+        tree   = "data/{dataset}/tree.nwk",
+        traits = "data/{dataset}/traits.csv",
+    params:
+        n_leaves = lambda wc: dataset_parts(wc.dataset)[0],
+        n_traits = lambda wc: dataset_parts(wc.dataset)[1],
+        seed     = lambda wc: dataset_parts(wc.dataset)[2],
+    threads: 1
+    conda:
+        "envs/data.yaml"
+    shell:
+        """
+        python {SCRIPTS}/generate_data.py \
+            --n_leaves   {params.n_leaves} \
+            --n_traits   {params.n_traits} \
+            --tree_out   {output.tree} \
+            --traits_out {output.traits} \
+            --seed       {params.seed}
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. SimPhyNI  (official CLI)
+# ─────────────────────────────────────────────────────────────────────────────
+rule run_simphyni:
+    input:
+        tree   = "data/{dataset}/tree.nwk",
+        traits = "data/{dataset}/traits.csv",
+    output:
+        done = "results/{dataset}/simphyni/done",
+    params:
+        outdir = "results/{dataset}/simphyni",
+    threads: THREADS
+    conda:
+        "simphyni_dev"
+    resources:
+        runtime = TIME_LIMIT,
+    benchmark:
+        "benchmarks/{dataset}/SimPhyNI.tsv"
+    shell:
+        """
+        timeout {TIME_LIMIT}m \
+        simphyni run \
+            --tree     {input.tree} \
+            --traits   {input.traits} \
+            --cores    {threads} \
+            --outdir   {params.outdir} \
+            --min_prev 0.0 \
+            --max_prev 1.0 \
+        && touch {output.done}
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. FaST-LMM  (phylogeny_distance.py → pyseer CLI, fully in pyseer env)
+# ─────────────────────────────────────────────────────────────────────────────
+rule run_fastlmm:
+    input:
+        tree   = "data/{dataset}/tree.nwk",
+        traits = "data/{dataset}/traits.csv",
+    output:
+        done = "results/{dataset}/fastlmm/done",
+    params:
+        outdir  = "results/{dataset}/fastlmm",
+        kinship = "results/{dataset}/fastlmm/kinship.tsv",
+    threads: THREADS
+    conda:
+        "../envs/pyseer.yaml"
+    resources:
+        runtime = TIME_LIMIT,
+    benchmark:
+        "benchmarks/{dataset}/FaST-LMM.tsv"
+    shell:
+        """
+        mkdir -p {params.outdir}
+        python {PARENT_SCRIPTS}/phylogeny_distance.py {input.tree} --lmm \
+            > {params.kinship}
+        timeout {TIME_LIMIT}m \
+        python {SCRIPTS}/run_fastlmm_bench.py \
+            --traits  {input.traits} \
+            --kinship {params.kinship} \
+            --outfile {params.outdir}/results.csv \
+            --threads {threads} \
+        && touch {output.done}
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. TreeWAS
+# ─────────────────────────────────────────────────────────────────────────────
+rule run_treewas:
+    input:
+        tree   = "data/{dataset}/tree.nwk",
+        traits = "data/{dataset}/traits.csv",
+    output:
+        done = "results/{dataset}/treewas/done",
+    params:
+        outdir = "results/{dataset}/treewas",
+    threads: THREADS
+    conda:
+        "envs/R_bench.yaml"
+    resources:
+        runtime = TIME_LIMIT,
+    benchmark:
+        "benchmarks/{dataset}/TreeWAS.tsv"
+    shell:
+        """
+        mkdir -p {params.outdir}
+        SLURM_CPUS_PER_TASK={threads} \
+        timeout {TIME_LIMIT}m \
+        Rscript {SCRIPTS}/run_treewas_bench.R \
+            --tree    {input.tree} \
+            --traits  {input.traits} \
+            --threads {threads} \
+            --outdir  {params.outdir} \
+        && touch {output.done}
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Pagel
+# ─────────────────────────────────────────────────────────────────────────────
+rule run_pagel:
+    input:
+        tree   = "data/{dataset}/tree.nwk",
+        traits = "data/{dataset}/traits.csv",
+    output:
+        done = "results/{dataset}/pagel/done",
+    params:
+        outfile = "results/{dataset}/pagel/results.csv",
+    threads: THREADS
+    conda:
+        "envs/R_bench.yaml"
+    resources:
+        runtime = TIME_LIMIT,
+    benchmark:
+        "benchmarks/{dataset}/Pagel.tsv"
+    shell:
+        """
+        timeout {TIME_LIMIT}m \
+        Rscript {SCRIPTS}/run_pagel_bench.R \
+            --tree    {input.tree} \
+            --traits  {input.traits} \
+            --threads {threads} \
+            --outfile {params.outfile} \
+        && touch {output.done}
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Scoary  (scoary2 CLI directly, matrix transpose done inline)
+# ─────────────────────────────────────────────────────────────────────────────
+rule run_scoary:
+    input:
+        tree   = "data/{dataset}/tree.nwk",
+        traits = "data/{dataset}/traits.csv",
+    output:
+        done    = "results/{dataset}/scoary/done",
+        genes_T = "results/{dataset}/scoary/genes_transposed.csv",
+    params:
+        outdir = "results/{dataset}/scoary",
+    threads: THREADS
+    conda:
+        "../envs/scoary2.yaml"
+    resources:
+        runtime = TIME_LIMIT,
+    benchmark:
+        "benchmarks/{dataset}/Scoary.tsv"
+    shell:
+        """
+        mkdir -p {params.outdir}
+        python {SCRIPTS}/prep_scoary.py \
+            --traits  {input.traits} \
+            --genes_T {output.genes_T}
+        timeout {TIME_LIMIT}m \
+        scoary2 \
+            --genes          {output.genes_T} \
+            --gene-data-type gene-count:, \
+            --traits         {input.traits} \
+            --outdir         {params.outdir}/scoary_out \
+            --n-permut       0 \
+            --newicktree={input.tree} \
+            --threads        {threads} \
+        && touch {output.done}
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. Coinfinder  (coinfinder CLI directly, edge file built inline)
+# ─────────────────────────────────────────────────────────────────────────────
+rule run_coinfinder:
+    input:
+        tree   = "data/{dataset}/tree.nwk",
+        traits = "data/{dataset}/traits.csv",
+    output:
+        done  = "results/{dataset}/coinfinder/done",
+        edges = "results/{dataset}/coinfinder/edges.tsv",
+    params:
+        outdir        = "results/{dataset}/coinfinder",
+        assoc_prefix  = "results/{dataset}/coinfinder/assoc",
+        dissoc_prefix = "results/{dataset}/coinfinder/dissoc",
+    threads: THREADS
+    conda:
+        "../envs/coinfinder.yaml"
+    resources:
+        runtime = TIME_LIMIT,
+    benchmark:
+        "benchmarks/{dataset}/Coinfinder.tsv"
+    shell:
+        """
+        mkdir -p {params.outdir}
+        python {SCRIPTS}/prep_coinfinder.py \
+            --traits {input.traits} \
+            --edges  {output.edges}
+        timeout {TIME_LIMIT}m \
+        coinfinder \
+            -i {output.edges} \
+            -p $(realpath {input.tree}) \
+            -a \
+            -o {params.assoc_prefix} \
+            -n \
+            -x {threads}
+        timeout {TIME_LIMIT}m \
+        coinfinder \
+            -i {output.edges} \
+            -p $(realpath {input.tree}) \
+            -d \
+            -o {params.dissoc_prefix} \
+            -n \
+            -x {threads}
+        touch {output.done}
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. Collect runtimes and plot
+# ─────────────────────────────────────────────────────────────────────────────
+rule collect_runtimes:
+    input:
+        expand("benchmarks/{dataset}/{tool}.tsv",
+               dataset=DATASETS, tool=TOOLS),
+    output:
+        plot       = "runtime_boxplot.svg",
+        plot_facet = "runtime_boxplot_facet.svg",
+    conda:
+        "envs/data.yaml"
+    shell:
+        """
+        python {SCRIPTS}/collect_runtimes.py \
+            --benchmark_dir benchmarks \
+            --out_plot      {output.plot} \
+            --out_facet     {output.plot_facet}
+        """
